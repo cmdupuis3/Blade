@@ -21,6 +21,7 @@ open Blade.TypeCheckIde
 open Blade.TypeLower
 open Blade.TypeCheckSupport
 open Blade.TypeCheckInfer
+open Blade.TypeCheckInferUnits
 
 // After type checking, some IRTInfer nodes may remain in the typed AST.
 // These are either (a) solved but unresolved (the substitution knows the answer

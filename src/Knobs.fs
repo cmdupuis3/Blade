@@ -7,7 +7,7 @@
 // of text. docs/reference/knobs.md is GENERATED from this table
 // (`blade test knobs --write`; `blade test knobs` fails when the committed
 // file is out of date), and the `knobs` test block also checks the table
-// against CLAUDE.md's knob table and against the hand-kept lists
+// against the hand-written notes (docs/reference/knob-notes.md) and the hand-kept lists
 // (`Optimize.optimizerGates`, `Optimize.optimizerGateMirrors`,
 // `CliSelfTests.suiteClearedKnobs` / `suitePinnedKnobs`,
 // `Setup.persistedToolchainKeys`).
@@ -98,7 +98,7 @@ type Knob =
       Values: Value list
       Suite: SuiteAction
       Toolchain: ToolchainMirror
-      /// Named in CLAUDE.md. `false` marks a knob the project guide does not
+      /// Named in docs/reference/knob-notes.md. `false` marks a knob the notes do not
       /// mention yet (the `knobs` block checks the flag both ways).
       Documented: bool
       /// One line, under 160 characters.
@@ -134,7 +134,7 @@ let private armOn name extra text =
 
 // ---------------------------------------------------------------------------
 // The table. Each entry is a named value (the read sites name it); `all` lists
-// them in the order of CLAUDE.md's knob table, the undocumented ones last.
+// them in the order of the notes table (docs/reference/knob-notes.md), the undocumented ones last.
 // ---------------------------------------------------------------------------
 
 // ---- the BLAS / LAPACK route ----
@@ -554,7 +554,7 @@ let joinReport =
         Cleared EnvOnly true
         "Compile-time: the C++ lane emits a [join] report line after each hash join's counting pass."
 
-// ---- not in CLAUDE.md yet (Documented = false) ----
+// ---- no notes yet (Documented = false) ----
 let blasLink =
     knob "BLADE_BLAS_LINK" Infrastructure [ Compiler ] "unset"
         [ v "<flags>" "the explicit tier's link flags (MKL, BLIS); their presence selects that tier" ]
@@ -636,7 +636,7 @@ let testFsharpParallel =
         Untouched EnvOnly false
         "Runs the test harness's F# pipeline unlocked (an experiment; the default stays locked)."
 
-/// Every knob, in the order of CLAUDE.md's knob table, the undocumented ones
+/// Every knob, in the order of the notes table, the undocumented ones
 /// last.
 let all : Knob list =
     [ openblasDir; blas; blasPrefer; cublas; memcheck; ompThreads; fpRepro; fpReassoc

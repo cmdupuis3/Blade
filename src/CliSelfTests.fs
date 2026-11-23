@@ -140,7 +140,7 @@ let internal withSuiteEnvironment (quiet: bool) (f: unit -> 'a) : 'a =
 // into the block's directory, one argument list, a child-only environment, and
 // checks on the exit code and the output -- is a `CliCase` row, run by
 // `runCliCases`. A case that compares two runs, parses its output or works in
-// process stays code in `runCliSmokeTests`.
+// process stays code in `runCliSmokeTestsWith`.
 
 /// One check on a child run. A `Line*` check reads the FIRST stdout line
 /// (CRLF normalized) that starts with its prefix, `<none>` when there is none.
@@ -236,8 +236,46 @@ let internal runCliCases
         let passed = cliCase.Expect |> List.forall (cliExpectHolds dir (code, out, err))
         record cliCase.Name (if passed then TH.Pass else TH.Fail) (cliDetailText cliCase.Detail passed (out, err))
 
-/// What every block of the CLI smoke tests shares: `runCliSmokeTests`' result recorder and its
-/// child-run helpers (built once, after the helpers).
+// --- The `blade test` key map's types (K18; the table and its resolver are
+// at the dispatcher, `testKeyTable` / `resolveTestInvocation`) ---
+
+/// What a `blade test <key>` row runs.
+[<NoEquality; NoComparison>]
+type internal TestKeyRun =
+    /// These blocks, in order; exit 0 iff none of them failed.
+    | Blocks of (unit -> TH.BlockResult) list
+    /// A lane that computes its own exit code.
+    | Exits of (unit -> int)
+    /// A run that reads the dispatcher's own resolution (the blocks that
+    /// check it, and the suite that runs them), handed it when it runs.
+    | WithResolver of ((string list -> TestInvocation) -> int)
+
+and [<NoEquality; NoComparison>] internal TestKeyRow =
+    { /// The spellings, the main one first.
+      Keys: string list
+      Run: TestKeyRun }
+
+/// What the words after `blade test` ask for.
+and [<NoEquality; NoComparison>] internal TestInvocation =
+    | FullSuite of FullSuiteOptions
+    | IrOnly
+    | GenOnly
+    /// A single-word key of `testKeyTable`.
+    | Key of TestKeyRow
+    | Knobs of string list
+    | DocsPage of string
+    /// A differential lane given a name that is no corpus directory it can run.
+    | UnknownLaneCategory of lane: string * cat: string
+    /// A differential lane over one corpus directory.
+    | LaneCategory of lane: string * cat: string
+    | LlvmBackendCategory of string
+    /// A corpus category (display name, tests).
+    | Category of string * (string * string) list
+    | UnknownCategory of string
+    | Unrecognized
+
+/// What every block of the CLI smoke tests shares: `runCliSmokeTestsWith`' result recorder, its
+/// child-run helpers (built once, after the helpers) and the `blade test` resolver it is handed.
 [<NoEquality; NoComparison>]
 type internal CliSmokeContext =
     { Record: string -> TH.Outcome -> string -> unit
@@ -245,7 +283,8 @@ type internal CliSmokeContext =
       Spawn: string -> string list -> int * string * string
       SpawnWith: (string * string) list -> string -> string list -> int * string * string
       Beside: string -> string list
-      SelfExe: string option }
+      SelfExe: string option
+      ResolveTest: string list -> TestInvocation }
 
 let private cliSmokeCompileRun (ctx: CliSmokeContext) : unit =
     let { Record = record } = ctx
@@ -569,17 +608,11 @@ let private cliVerbsUsageCases : CliCase list =
           Name = "cli: `test interp <typo>` is a clean usage error, not BL9001"
           Args = [ "test"; "interp"; "no-such-category" ]
           Expect = [ ExitIs 1; ErrHas "unknown corpus category 'no-such-category'"; ErrLacks "BL9001" ]
-          Detail = OnFail ErrText }
-      // ...but the guard must not refuse a lane's RESERVED words: it once
-      // knew only `all` / `corpus` for llvm, and CI's `test llvm goldens`
-      // step died on it. The goldens themselves are CI's step; this pins
-      // only that the word gets past the guard.
-      { cliCase with
-          Name = "cli: `test llvm goldens` is not refused as an unknown category"
-          Args = [ "test"; "llvm"; "goldens" ]
-          Expect = [ ErrLacks "unknown corpus category" ]
-          Detail = ErrText }
-      // `check` LOWERS: a construct that typechecks but has no lowering
+          Detail = OnFail ErrText } ]
+
+/// The usage cases after `test llvm goldens` (which `cliSmokeVerbs` checks in process).
+let private cliVerbsUsageLaterCases : CliCase list =
+    [ // `check` LOWERS: a construct that typechecks but has no lowering
       // rule where it sits is refused by check itself -- coded BL6002 and
       // spanned at the expression -- not first by `emit`, spanless.
       { cliCase with
@@ -992,6 +1025,19 @@ let private cliSmokeVerbs (ctx: CliSmokeContext) : unit =
         try
             let runCases = runCliCases spawnWith record dir
             runCases cliVerbsUsageCases
+            // ...but the guard must not refuse a lane's RESERVED words: it once
+            // knew only `all` / `corpus` for llvm, and CI's `test llvm goldens`
+            // step died on it. The goldens themselves are CI's step; this pins
+            // only that the word gets past the guard -- resolved through the
+            // dispatcher in process (T17: a child `blade test llvm goldens`
+            // RAN the goldens, outlived the 180-second spawn limit and passed
+            // on the timeout text).
+            (let name = "cli: `test llvm goldens` is not refused as an unknown category"
+             match ctx.ResolveTest [ "llvm"; "goldens" ] with
+             | LaneCategory ("llvm", "goldens") -> record name TH.Pass ""
+             | UnknownLaneCategory (lane, cat) -> record name TH.Fail $"refused: unknown corpus category '{cat}' for `test {lane}`"
+             | _ -> record name TH.Fail "resolved to another invocation than the llvm lane over `goldens`")
+            runCases cliVerbsUsageLaterCases
             // BLADE_POOL_RETAIN (round-3 A4, gap G52): the plan's build line
             // names the runtime pool-retention policy -- the default, the
             // opt-in arm with its per-thread honesty, a malformed value read
@@ -1558,16 +1604,657 @@ let private cliSmokeCompactionFusion (ctx: CliSmokeContext) : unit =
         finally
             try Directory.Delete(dir, true) with _ -> ()
 
+// --- AGGREGATE-ONLY GROUPING: fixtures, helpers and rows (K18) ---
+//
+// The block below compares runs with each other (gate off vs on, lane vs
+// lane, every lane vs the interpreter), so no case of it is one `CliCase`
+// run. What is data is the set of fixtures and the three families of rows:
+// the gate-identity programs (`GroupAggGateCase`), the guard-location
+// fixtures (`GuardLocCase`) and the cancellation arms (`CancelArm`).
+
+/// (1) The key -> group map (blade_member.h, the C core both lanes run): a
+/// g++-built driver streams keys of several shapes (few / many distinct,
+/// Int64 extremes, a run of growth) and checks every answer against a
+/// first-occurrence std::unordered_map reference, that a new group's record
+/// is all-zero, that records written before a growth survive it, and that
+/// an injected allocation failure is REPORTED (init 0 / group -1, the map
+/// unchanged) and every free releases every allocation.
+let private groupAggGkmapDriver =
+    String.concat "\n"
+        [ "#include <cstdio>"
+          "#include <cstdint>"
+          "#include <cstdlib>"
+          "#include <vector>"
+          "#include <unordered_map>"
+          "static unsigned long long g_fail = 0;"
+          "static int g_ord = 0, g_live = 0;"
+          "static void* t_malloc(size_t n) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::malloc(n); if (p) g_live++; return p; }"
+          "static void* t_calloc(size_t n, size_t s) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::calloc(n, s); if (p) g_live++; return p; }"
+          "static void t_free(void* p) { if (p) { g_live--; std::free(p); } }"
+          "#define BLADE_MEMBER_MALLOC(b) t_malloc(b)"
+          "#define BLADE_MEMBER_CALLOC(n, s) t_calloc((n), (s))"
+          "#define BLADE_MEMBER_FREE(p) t_free(p)"
+          "#include \"blade_member.h\""
+          "static uint64_t s_ = 0x2545F4914F6CDD1Dull;"
+          "static uint64_t nx() { s_ ^= s_ << 13; s_ ^= s_ >> 7; s_ ^= s_ << 17; return s_; }"
+          "int main() {"
+          "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
+          "    const int distinct[] = {1, 2, 15, 16, 17, 1009, 100003};"
+          "    long rows = 0, bad = 0;"
+          "    for (int shape = 0; shape < 3; shape++)"
+          "    for (int di = 0; di < 7; di++) {"
+          "        const int d = distinct[di];"
+          "        std::vector<int64_t> pool((size_t)d);"
+          "        for (int i = 0; i < d; i++) pool[i] = shape == 0 ? (int64_t)i * 7919 + 13 : shape == 1 ? (int64_t)nx() : ex[i % 7] ^ (int64_t)(i / 7);"
+          "        blade_gkmap_i64 t;"
+          "        g_fail = 0; g_ord = 0; g_live = 0;"
+          "        if (!blade_gkmap_init_i64(&t, 3)) { bad++; continue; }"
+          "        std::unordered_map<int64_t, int64_t> ref;"
+          "        const int n = d * 3 + 11;"
+          "        for (int r = 0; r < n; r++) {"
+          "            int64_t k = pool[(size_t)(r < d ? r : (int)(nx() % (uint64_t)d))];"
+          "            auto it = ref.find(k);"
+          "            int64_t want = it == ref.end() ? (int64_t)ref.size() : it->second;"
+          "            if (it == ref.end()) ref.emplace(k, want);"
+          "            int64_t g = blade_gkmap_group_i64(&t, k);"
+          "            if (g != want) { bad++; if (bad < 5) std::printf(\"BAD group d=%d r=%d got %lld want %lld\\n\", d, r, (long long)g, (long long)want); continue; }"
+          "            blade_gk_slot* rec = blade_gkmap_record_i64(&t, g);"
+          "            if (rec[0].i == 0 && (rec[1].i != 0 || rec[2].d != 0.0)) bad++;"
+          "            rec[0].i++; rec[1].i += k; rec[2].d += 1.0;"
+          "            rows++;"
+          "        }"
+          "        if (blade_gkmap_count_i64(&t) != (int64_t)ref.size()) bad++;"
+          "        // every record survived every growth: count, key sum, float count"
+          "        for (auto& kv : ref) { blade_gk_slot* rec = blade_gkmap_record_i64(&t, kv.second); if (rec[0].i <= 0 || (double)rec[0].i != rec[2].d || (int64_t)((uint64_t)rec[0].i * (uint64_t)kv.first) != rec[1].i) bad++; }"
+          "        blade_gkmap_free_i64(&t);"
+          "        if (g_live != 0) { bad++; std::printf(\"BAD leak d=%d live=%d\\n\", d, g_live); }"
+          "    }"
+          "    // allocation failure: init's k-th allocation, then a growth's (table or records)"
+          "    long reported = 0;"
+          "    for (int k = 0; k < 4; k++) {"
+          "        blade_gkmap_i64 t; g_fail = 1ull << k; g_ord = 0; g_live = 0;"
+          "        if (blade_gkmap_init_i64(&t, 2)) bad++; else reported++;"
+          "        if (g_live != 0) bad++;"
+          "    }"
+          "    for (int k = 4; k < 12; k++) {"
+          "        blade_gkmap_i64 t; g_fail = 0; g_ord = 0; g_live = 0;"
+          "        if (!blade_gkmap_init_i64(&t, 2)) { bad++; continue; }"
+          "        g_fail = 1ull << k;"
+          "        int64_t last = 0, failedAt = -1;"
+          "        for (int64_t key = 0; key < 200; key++) { last = blade_gkmap_group_i64(&t, key * 31); if (last < 0) { failedAt = key; break; } }"
+          "        if (failedAt < 0) bad++; else {"
+          "            reported++;"
+          "            if (blade_gkmap_count_i64(&t) != failedAt) bad++;"
+          "            for (int64_t key = 0; key < failedAt; key++) if (blade_gkmap_group_i64(&t, key * 31) != key) bad++;"
+          "        }"
+          "        blade_gkmap_free_i64(&t);"
+          "        if (g_live != 0) bad++;"
+          "    }"
+          "    std::printf(\"GKMAP CORE: %ld rows, %ld failures reported, %ld bad\\n\", rows, reported, bad);"
+          "    return bad == 0 ? 0 : 1;"
+          "}"
+          "" ]
+
+let private groupAggGen =
+    "function gen(k: Int64, seed: Int64) -> Float64 = {\n"
+    + "    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648\n"
+    + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
+    + "    2.0 * (Float64(h2) / 2147483648.0)\n"
+    + "}\n"
+
+// a scalar fingerprint over random data, positional and dynamic
+let private groupAggProg (keyType: string) (keyExpr: string) =
+    "type Ix = Idx<3001>\ntype G = Idx<37>\n" + groupAggGen
+    + $"function agg(k: Array<{keyType} like Ix>, x: Array<Float64 like Ix>) -> Float64 = {{\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+    + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+    + "    let t = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a * 0.75 + b, 0.5) |> compute\n"
+    + "    prodsum(s, s) + reduce(q, (+)) + reduce(t, (+))\n}\n"
+    + $"let keys = method_for(range<Ix>) <@> lambda(i) -> {keyExpr} |> compute\n"
+    + "let xs = method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i), 20000038) |> compute\n"
+    + "let checksum = agg(keys, xs)\n"
+
+// EVERY state printed per group: the four state machines; signed
+// zeros (an all -0.0 group, a -0.0 seed); a singleton at the FINAL
+// row (group 3); a nonzero seed; the ordered non-commutative Int64
+// fold, seeded and unseeded; cancellation inside a group (1e16,
+// -1e16, 1.0); a positional EMPTY group (4) for the seeded, prodsum
+// and count states. Positional, so both lanes route it.
+let private groupAggStatesBody (regimeKeys: string) (keyType: string) =
+    "type Row = Idx<9>\n" + regimeKeys
+    + $"function st(k: Array<{keyType} like Row>, x: Array<Float64 like Row>, w: Array<Int64 like Row>) = {{\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n    let gw = group_by(w, gk)\n"
+    + "    let t = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+), 0.75) |> compute\n"
+    + "    let z = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a + b, -0.0) |> compute\n"
+    + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
+    + "    let n = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
+    + "    let f = method_for(gw) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b, 5) |> compute\n"
+    + "    (t, z, q, n, f)\n}\n"
+    + "let x: Array<Float64 like Row> = [-0.0, 1e16, -0.0, 0.1, -1e16, 0.2, -0.0, 1.0, -0.0]\n"
+    + "let w: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+    + "let (t, z, q, n, f) = st(keys, x, w)\n"
+
+// FINDING 1's producers: a COUNT-only and an UNUSED grouped array
+// whose producer FAILS (10 / 0). Module-level deferred (`lazy`):
+// declined (not proved stored), as written in both gates; the LLVM
+// lane refuses the deferred module read (pre-existing) and the C++
+// lane runs. Body producer (`|> compute`d at its own site, so
+// stored and admitted): the producer fails at its own statement,
+// before the grouping, in both gates and both lanes.
+let private groupAggLazyHead = "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet lazy = method_for(den) <@> lambda(d) -> 10 / d\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
+let private groupAggBodyHead = "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
+
+/// The run-time fixtures, in the order the block writes them.
+let private groupAggFixtures : (string * string) list =
+    [ ("gpos.blade", groupAggProg "G" "Int64(floor(gen(Int64(i), 10000019) * 18.5))")
+      ("gdyn.blade", groupAggProg "Int64" "7919 * Int64(floor(gen(Int64(i), 10000019) * 18.5)) + 13")
+      ("gstates.blade",
+       groupAggStatesBody "type G = Idx<5>\nlet keys: Array<G like Row> = [0, 1, 0, 2, 1, 2, 0, 1, 3]\n" "G")
+      // the UNSEEDED machine over the same data (no empty group: an
+      // unseeded empty group is the BL8003 fixture below)
+      ("gunseeded.blade",
+       "type Row = Idx<9>\ntype G = Idx<4>\n"
+       + "function un(k: Array<G like Row>, x: Array<Float64 like Row>, w: Array<Int64 like Row>) = {\n"
+       + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n    let gw = group_by(w, gk)\n"
+       + "    let u = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+       + "    let f = method_for(gw) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+       + "    (u, f)\n}\n"
+       + "let keys: Array<G like Row> = [0, 1, 0, 2, 1, 2, 0, 1, 3]\n"
+       + "let x: Array<Float64 like Row> = [-0.0, 1e16, -0.0, 0.1, -1e16, 0.2, -0.0, 1.0, -0.0]\n"
+       + "let w: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+       + "let (u, f) = un(keys, x, w)\n")
+      // the dynamic regime's arrays (the LLVM lane refuses a function's
+      // dynamic-extent array result -- pre-existing -- so C++ only)
+      ("gdynstates.blade",
+       groupAggStatesBody "let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 9, 7, 3, 11]\n" "Int64")
+      ("gcancel.blade",
+       "type Row = Idx<12>\n"
+       + "function agg(k: Array<Int64 like Row>, x: Array<Float64 like Row>) -> Float64 = {\n"
+       + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
+       + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
+       + "    prodsum(s, s)\n}\n"
+       + "let keys: Array<Int64 like Row> = [5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6]\n"
+       + "let xs: Array<Float64 like Row> = [1e16, -1e16, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1e8, -1e8, 1.0]\n"
+       + "let checksum = agg(keys, xs)\n")
+      // COMPLETE-FAILURE fixtures (review finding 4): 066's unseeded
+      // empty group (BL8003 at the peel), 073's positional key past the
+      // last group (BL8006 at the grouping), 074's intervening BL8013 --
+      // tuple results, so the LLVM lane routes them too.
+      ("f066.blade",
+       "type Region = Idx<3>\ntype Row = Idx<4>\n"
+       + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
+       + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+       + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
+       + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+       + "    (n, s)\n}\n"
+       + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet (n, s) = agg(keys, vals)\n")
+      ("f073.blade",
+       "type Region = Idx<3>\ntype Row = Idx<5>\n"
+       + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
+       + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+       + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n"
+       + "    (s, s)\n}\n"
+       + "let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute\n"
+       + "let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\nlet (s, s2) = agg(keys, vals)\n")
+      ("f074.blade",
+       "type Region = Idx<3>\ntype Row = Idx<4>\n"
+       + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>, d: Int64) = {\n"
+       + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n    let z = 10 / d\n"
+       + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+       + "    (z, s)\n}\n"
+       + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet (z, s) = agg(keys, vals, 0)\n")
+      ("wcount.blade",
+       groupAggLazyHead + "function counts(key: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(lazy, gk)\n"
+       + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k)\n")
+      ("wunused.blade",
+       groupAggLazyHead + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(lazy, gk)\n"
+       + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v)\n")
+      ("wbodycount.blade",
+       groupAggBodyHead + "function counts(key: Array<Int64 like Two>, dd: Array<Int64 like Two>) -> Int64 = {\n    let p = method_for(dd) <@> lambda(d) -> 10 / d |> compute\n    let gk = group_keys(key)\n    let g = group_by(p, gk)\n"
+       + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k, den)\n")
+      ("wbodyunused.blade",
+       groupAggBodyHead + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>, dd: Array<Int64 like Two>) -> Int64 = {\n    let p = method_for(dd) <@> lambda(d) -> 10 / d |> compute\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(p, gk)\n"
+       + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v, den)\n")
+      // FINDING 2's type witness: a singleton Int64 group of
+      // 9007199254740993 and a multirow one, folded by a Float64-valued
+      // kernel into an Int64 aggregate. The plan declines; each lane's
+      // own outcome is identical in both gates (the C++ lane rejects the
+      // emitted conversion, BL9002, and the LLVM lane rounds through
+      // double -- a pre-existing ordinary-fold typing discrepancy,
+      // recorded in gap G71, not fixed here).
+      ("wtype.blade",
+       "type Row = Idx<3>\ntype Region = Idx<2>\n"
+       + "function f(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+       + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> Float64(a) + Float64(b)) |> compute\n    (s, s)\n}\n"
+       + "let keys: Array<Region like Row> = [0, 1, 1]\nlet vals: Array<Int64 like Row> = [9007199254740993, 9007199254740993, 2]\nlet (s, s2) = f(keys, vals)\n") ]
+
+let private groupAggLaneOf (llvm: string) = if isNull llvm then "C++" else "LLVM"
+let private groupAggRoutedLl (oe: string) = oe.Contains ".ll" && not (oe.Contains "falling back to C++")
+let private groupAggRouteOk (llvm: string) (oe: string) = if isNull llvm then not (oe.Contains ".ll") else groupAggRoutedLl oe
+let private groupAggEnv (llvm: string) (gate: string) (repro: bool) (extra: (string * string) list) =
+    [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_GROUP_AGG", gate)
+      ("BLADE_FP_REPRO", (if repro then "1" else null))
+      ("BLADE_FP_CONTRACT", (if repro then "off" else null))
+      ("BLADE_PRINT_BITS", "1") ] @ extra
+
+/// (exit, stdout, stderr) of one run, the build's `--verbose` lines stripped from stderr
+let private groupAggRun (ctx: CliSmokeContext) (dir: string) (prog: string) (env: (string * string) list) =
+    let (c, o, e) = ctx.SpawnWith env dir [ "run"; $"{prog}.blade"; "--verbose" ]
+    let strip (s: string) =
+        s.Replace("\r\n", "\n").Split('\n')
+        |> Array.filter (fun l -> not (l.StartsWith "[Emit]" || l.StartsWith "[Build]" || l.StartsWith "[cache]" || l.Contains " completed in "))
+        |> String.concat "\n"
+    (c, strip o, strip e, o + e)
+
+let private groupAggPlanned (ctx: CliSmokeContext) (dir: string) (prog: string) (fn: string) (env: (string * string) list) =
+    let (_, o, e) = ctx.SpawnWith env dir [ "plan"; $"{prog}.blade" ]
+    let t = o + e
+    if t.Contains $"[group-aggregate v1] {fn} @ " && t.Contains $"[group-aggregate v1] {fn} @ " then
+        let line = t.Replace("\r\n", "\n").Split('\n') |> Array.find (fun l -> l.Contains $"[group-aggregate v1] {fn} @ ")
+        if line.Contains ": applied [" then "applied" elif line.Contains "disabled by BLADE_GROUP_AGG" then "disabled" else "declined"
+    else "no record"
+
+type private GroupAggExit =
+    | ExitZero
+    | ExitNonZero
+
+/// One gate-identity program: gate off vs on, one lane, the plan the gate-on
+/// build must record, the exit, and the abort code pinned in BOTH gates.
+type private GroupAggGateCase =
+    { Prog: string
+      Fn: string
+      Plan: string
+      Exit: GroupAggExit
+      Code: string option
+      What: string }
+
+/// Gate off vs on, one lane: identical exit, stdout (raw bits) and
+/// stderr; route; the plan applied on / disabled off (or the
+/// expected decline in both); an abort fixture also pins its
+/// expected code in BOTH gates, so a build failure (BL9002) or any
+/// other abort cannot stand in for the intended run-time one.
+let private groupAggGateIdentity (ctx: CliSmokeContext) (dir: string) (llvm: string) (row: GroupAggGateCase) : unit =
+    let { Prog = prog; Fn = fn; Plan = expectPlan; Code = expectCode; What = what } = row
+    let lane = groupAggLaneOf llvm
+    let (c0, o0, e0, oe0) = groupAggRun ctx dir prog (groupAggEnv llvm "0" true [])
+    let (c1, o1, e1, oe1) = groupAggRun ctx dir prog (groupAggEnv llvm null true [])
+    let p0 = groupAggPlanned ctx dir prog fn (groupAggEnv llvm "0" true [])
+    let p1 = groupAggPlanned ctx dir prog fn (groupAggEnv llvm null true [])
+    let planOk = if expectPlan = "applied" then p0 = "disabled" && p1 = "applied" else p1 = expectPlan
+    let codeOk =
+        match expectCode with
+        | Some code -> (o0 + e0).Contains $"error[{code}]" && (o1 + e1).Contains $"error[{code}]" && not ((o1 + e1).Contains "error[BL9002]")
+        | None -> true
+    let exitOk = match row.Exit with ExitZero -> c1 = 0 | ExitNonZero -> c1 <> 0
+    let ok = c0 = c1 && exitOk && o0 = o1 && e0 = e1 && groupAggRouteOk llvm oe0 && groupAggRouteOk llvm oe1 && planOk && codeOk
+    let codeText = match expectCode with Some code -> $", code {code} in both gates" | None -> ""
+    ctx.RecordCase $"cli: group aggregate ({lane}, {prog}) {what}: gate off == on (exit, stdout with raw bits, complete stderr), route {lane}, plan {expectPlan}{codeText}"
+        ok ($"exit {c0}/{c1}; plan {p0}/{p1}; stdout same={o0 = o1}; stderr same={e0 = e1}; on: {o1.Trim()} {e1.Trim()}")
+
+/// The gate-identity programs both lanes run, lane by lane in this order.
+let private groupAggGateCases : GroupAggGateCase list =
+    [ { Prog = "gpos"; Fn = "agg"; Plan = "applied"; Exit = ExitZero; Code = None; What = "random positional data, scalar fingerprint" }
+      { Prog = "gdyn"; Fn = "agg"; Plan = "applied"; Exit = ExitZero; Code = None; What = "random dynamic data, scalar fingerprint" }
+      { Prog = "gstates"; Fn = "st"; Plan = "applied"; Exit = ExitZero; Code = None; What = "every state per group (seeded 0.75 / -0.0, prodsum, count, 3a+b seeded; signed zeros; final-row singleton; empty group)" }
+      { Prog = "gunseeded"; Fn = "un"; Plan = "applied"; Exit = ExitZero; Code = None; What = "the unseeded machine per group (Float64 and the ordered 3a+b Int64; signed zeros; final-row singleton)" }
+      { Prog = "f066"; Fn = "agg"; Plan = "applied"; Exit = ExitNonZero; Code = Some "BL8003"; What = "complete failure: unseeded empty group, BL8003 at the peel" }
+      { Prog = "f073"; Fn = "agg"; Plan = "applied"; Exit = ExitNonZero; Code = Some "BL8006"; What = "complete failure: positional key past the last group, BL8006 at the grouping" }
+      { Prog = "f074"; Fn = "agg"; Plan = "applied"; Exit = ExitNonZero; Code = Some "BL8013"; What = "complete failure: an intervening BL8013 before the peel's BL8003" }
+      { Prog = "wbodycount"; Fn = "counts"; Plan = "applied"; Exit = ExitNonZero; Code = Some "BL8013"; What = "a failing (stored) producer of a COUNT-only grouped array fails at its own statement" }
+      { Prog = "wbodyunused"; Fn = "sums"; Plan = "applied"; Exit = ExitNonZero; Code = Some "BL8013"; What = "a failing (stored) producer of an UNUSED grouped array fails at its own statement" } ]
+
+/// The gate-identity program only the C++ lane runs (after both lanes' rows).
+let private groupAggGateCppCases : GroupAggGateCase list =
+    [ { Prog = "gdynstates"; Fn = "st"; Plan = "applied"; Exit = ExitZero; Code = None; What = "every state per group, the dynamic regime (C++ only: the LLVM lane refuses a function's dynamic-extent ARRAY result; gdyn's dynamic scalar and gcancel run both lanes)" } ]
+
+/// The deferred-producer forms decline, so both gates run the CSR;
+/// the C++ lane, and the LLVM lane, which since W4B-B (gap G75)
+/// evaluates the deferred module map privately in the function body
+/// instead of refusing the read: the same BL8013, no fallback
+let private groupAggDeferredProducers (ctx: CliSmokeContext) (dir: string) : unit =
+    for (prog, fn) in [ ("wcount", "counts"); ("wunused", "sums") ] do
+        let (c0, o0, e0, _) = groupAggRun ctx dir prog (groupAggEnv null "0" true [])
+        let (c1, o1, e1, _) = groupAggRun ctx dir prog (groupAggEnv null null true [])
+        let p1 = groupAggPlanned ctx dir prog fn (groupAggEnv null null true [])
+        let (cl, oll, ell, ol) = groupAggRun ctx dir prog (groupAggEnv "1" null true [])
+        // the abort's identity, as the LLVM differential reads it: the
+        // first `error[...]` line and its `  --> file:line` location
+        // `blade run` relays the program's stderr behind a `[stderr]: `
+        // prefix, so the diagnostic is found by its `error[` token
+        let firstDiag (s: string) =
+            let ls = s.Replace("\r\n", "\n").Split('\n')
+            match ls |> Array.tryFindIndex (fun l -> l.Contains "error[") with
+            | Some i ->
+                let d = ls.[i].Substring(ls.[i].IndexOf "error[")
+                let loc = if i + 1 < ls.Length && ls.[i + 1].TrimStart().StartsWith "-->" then ls.[i + 1].Trim() else "<no location>"
+                d + " | " + loc
+            | None -> "<no diagnostic>"
+        let dCpp = firstDiag (o1 + "\n" + e1)
+        let dLl = firstDiag (oll + "\n" + ell)
+        ctx.RecordCase $"cli: group aggregate ({prog}) a DEFERRED failing producer of a count-only / unused grouped array: declined, BL8013 in both gates (C++) and in the LLVM lane (routed there, the same first diagnostic, location and exit)"
+            (p1 = "declined" && c0 <> 0 && c0 = c1 && e0 = e1 && o0 = o1 && dCpp.StartsWith "error[BL8013]"
+             && groupAggRoutedLl ol && cl = c1 && dLl = dCpp)
+            ($"plan {p1}; exit {c0}/{c1}; LLVM exit {cl}; C++ [{dCpp}]; LLVM [{dLl}]")
+
+/// THE MIXED-TYPE FOLD (first look's finding 2; second look's HIGH):
+/// a Float64-valued kernel folded into an Int64 accumulator. Base
+/// split on it (the C++ lane BL9002, the LLVM lane rounding through
+/// double: 9007199254740992, 9007199254740994 for 9007199254740993);
+/// since R11 the lowering refuses it, BL3020 at one location, in both
+/// lanes and both gates (nothing is emitted, so no route to check).
+/// The group-aggregate type decline keeps its own fixture
+/// (OptimizeTests decision_group_agg_declined_mixed_type_fold).
+let private groupAggMixedTypeFold (ctx: CliSmokeContext) (dir: string) : unit =
+    let firstDiagLoc (s: string) =
+        let ls = s.Replace("\r\n", "\n").Split('\n')
+        match ls |> Array.tryFindIndex (fun l -> l.Contains "error[") with
+        | Some i ->
+            let d = ls.[i].Substring(ls.[i].IndexOf "error[")
+            let code = if d.Length >= 13 then d.Substring(0, 13) else d
+            let loc = if i + 1 < ls.Length && ls.[i + 1].TrimStart().StartsWith "-->" then ls.[i + 1].Trim() else "<no location>"
+            code + " | " + loc
+        | None -> "<no diagnostic>"
+    let wtypeRuns =
+        [ for llvm in [ null; "1" ] do
+            for gate in [ "0"; null ] do
+                let (c, o, e, _) = groupAggRun ctx dir "wtype" (groupAggEnv llvm gate true [])
+                yield (c, firstDiagLoc (o + "\n" + e)) ]
+    let wtypeFirst = snd (List.head wtypeRuns)
+    ctx.RecordCase "cli: group aggregate (wtype) a Float64-valued fold into an Int64 aggregate: refused BL3020 at one location in both lanes and both gates (R11)"
+        (wtypeRuns |> List.forall (fun (c, d) -> c <> 0 && d = wtypeFirst)
+         && wtypeFirst.StartsWith "error[BL3020]" && not (wtypeFirst.EndsWith "<no location>"))
+        (wtypeRuns |> List.map (fun (c, d) -> $"exit {c}: {d}") |> String.concat "; ")
+
+/// THE INLINE EFFECTFUL KEY PRODUCER (Codex second look at e6eadfa2,
+/// BLOCKER): a top-level `group_keys` over an unforced inline map
+/// whose kernel bumps a captured counter. Every lane evaluates the
+/// producer once per CSR pass (pre-existing: calls = [6] over two
+/// rows and three passes); the LLVM lane's C-core map route is taken
+/// ONLY over a stored key pool, so this program keeps the linear scan
+/// (an unknown key lands in bucket 0: sizes = [2, 0]) and never
+/// numbers a group past the CSR it sized. The C++ lane refuses the
+/// program (BL7004, pre-existing). Per lane, both gates, routed.
+let private groupAggInlineKeyProducer (ctx: CliSmokeContext) (dir: string) : unit =
+    File.WriteAllText(Path.Combine(dir, "winline.blade"),
+        "type One = Idx<1>\ntype Two = Idx<2>\nlet mut calls: Array<Int64 like One> = [0]\nlet rows: Array<Int64 like Two> = [0, 0]\n"
+        + "function next_key(c: mut Array<Int64 like One>, x: Int64) -> Int64 = {\n    c(0) = c(0) + 1\n    c(0)\n}\n"
+        + "let gk = group_keys(method_for(rows) <@> lambda(x) -> next_key(calls, x))\nlet sizes = extents(gk)\n")
+    for llvm in [ null; "1" ] do
+        let lane = groupAggLaneOf llvm
+        let (c0, o0, e0, oe0) = groupAggRun ctx dir "winline" (groupAggEnv llvm "0" false [])
+        let (c1, o1, e1, oe1) = groupAggRun ctx dir "winline" (groupAggEnv llvm null false [])
+        let ok =
+            if isNull llvm then
+                c0 <> 0 && c1 <> 0 && (o0 + e0).Contains "error[BL7004]" && (o1 + e1).Contains "error[BL7004]" && o0 = o1 && e0 = e1
+            else
+                groupAggRoutedLl oe0 && groupAggRoutedLl oe1 && c0 = 0 && c1 = 0 && o0 = o1 && e0 = e1
+                && o1.Contains "sizes = [2, 0]" && o1.Contains "calls = [6]"
+        let expectText = if isNull llvm then "BL7004 in both gates (the C++ lane refuses it, pre-existing)" else "routed, exit 0, sizes = [2, 0], calls = [6] in both gates (the linear scan: no group past the CSR)"
+        ctx.RecordCase $"cli: group keys ({lane}, winline) an inline writing key producer: {expectText}"
+            ok ($"exit {c0}/{c1}; {o1.Trim()} {e1.Trim()}")
+
+// THE GUARD LOCATION RULE (gap G76), ONE failure text in all three
+// lanes: a runtime guard panic (BL8002 non-exhaustive match, BL8003
+// empty fold, BL8006 key) raised in the body of a callable the
+// program NAMED -- a function, a let-bound lambda -- is located at
+// that name's recorded declaration, through a plain `let x = f(..)`
+// and a destructuring `let (a, b) = f(..)` alike (the LLVM lane
+// INLINES a tuple-returning call: it used to locate the guard at the
+// caller's binding, which a destructuring let does not have, and
+// print no `-->` line); a block-local one has no recorded
+// declaration and is located nowhere in every lane; an anonymous
+// lambda's guard takes its enclosing declaration. An operator panic
+// (BL8013 / BL8014) names its own line. The frames are the
+// functions the program called, innermost first: the scalar ragged
+// peel runs its kernel body INLINED in every lane (no `lambda in s`
+// frame -- the LLVM lane used to push one). Each fixture's COMPLETE
+// failure lines (error, `-->`, every frame, in order) are pinned and
+// must be IDENTICAL in the C++ lane, the LLVM lane and the
+// interpreter (run in-process on the lowered file, its declaration
+// table installed from the program), gate on and off (T3's planned
+// grouping and peels), and with the A7c kept inline requested
+// (BLADE_EPILOGUE_LEGS=1: a callee that may fail is never inlined,
+// so its guard keeps the function's location). The ORDER: ord1 /
+// ord2 swap a match guard and a division.
+let private gkFn (ret: string) (tail: string) =
+    "type Region = Idx<3>\ntype Row = Idx<5>\n"
+    + $"function agg(k: Array<Region like Row>, v: Array<Int64 like Row>){ret} = {{\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n"
+    + $"    {tail}\n}}\n"
+    + "let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute\n"
+    + "let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\n"
+let private peelFn (ret: string) (tail: string) =
+    "type Region = Idx<3>\ntype Row = Idx<4>\n"
+    + $"function agg(k: Array<Region like Row>, v: Array<Int64 like Row>){ret} = {{\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+    + $"    {tail}\n}}\n"
+    + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\n"
+let private matchFn (ret: string) (body: string) (tail: string) = $"function cls(i: Int64, d: Int64){ret} = {{\n{body}    {tail}\n}}\n"
+let private mGuard = "    let m: Int64 = match i with\n        | 5 -> 1\n"
+let private dGuard = "    let q = 10 / d\n"
+let private castFn (ret: string) (tail: string) = $"function h(x: Float64){ret} = {{\n    let n = Int64(floor(x))\n    {tail}\n}}\nlet zz: Float64 = 0.0\n"
+let private a7cSource =
+    "type Ix = Idx<1003>\n"
+    + "function inputs(m: Int64) -> Array<Float64 like Ix> = {\n    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute\n}\n"
+    + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, k: Int64) -> Float64 = {\n"
+    + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute\n"
+    + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
+    + "    let m: Int64 = match k with\n        | 5 -> 1\n"
+    + "    s + Float64(m)\n}\n"
+    + "let (checksum, input_checksum) = {\n    let x = inputs(7)\n    let y = inputs(5)\n"
+    + "    (kernel(x, y, 4), reduce(x, (+)) + reduce(y, (+)))\n}\n"
+let private blockFn (destructure: bool) =
+    "let base = Int64([10, 20, 30])\nlet r = {\n    let k: Int64 = 0\n"
+    + "    function cap(i: Int64) = {\n        let q = base(1) / (i - k)\n        let m: Int64 = match q with\n            | 5 -> 1\n"
+    + (if destructure then "        (q, m)\n    }\n    let (u, v) = cap(5)\n    u + v\n}\n" else "        q + m\n    }\n    cap(5)\n}\n")
+let private bl8006 = "error[BL8006]: index out of bounds: a group_keys key outside 0 .. 2"
+let private bl8003 = "error[BL8003]: reduce: empty array, no reduction possible"
+let private bl8002 = "error[BL8002]: Blade: non-exhaustive match"
+let private bl8013 = "error[BL8013]: integer division by zero"
+let private bl8014 = "error[BL8014]: float-to-integer conversion of NaN or an out-of-range value"
+
+/// One guard-location fixture: the source (written as `<Fixture>.blade`), the
+/// error line, the `-->` line number in its file (None = unlocated), the
+/// frames innermost first, and extra environment for every run.
+type private GuardLocCase =
+    { Fixture: string
+      Source: string
+      ErrorLine: string
+      Line: int option
+      Frames: string list
+      Extra: (string * string) list }
+
+let private guardLocCase (fixture: string) (source: string) (error: string) (line: int option) (frames: string list) : GuardLocCase =
+    { Fixture = fixture; Source = source; ErrorLine = error; Line = line; Frames = frames; Extra = [] }
+
+let private guardLocCases : GuardLocCase list =
+    [ guardLocCase "gloc_tuple" (gkFn "" "(s, 1)" + "let (s, one) = agg(keys, vals)\n") bl8006 (Some 3) [ "agg" ]
+      guardLocCase "gloc_plain" (gkFn " -> Int64" "reduce(s, (+))" + "let t = agg(keys, vals)\n") bl8006 (Some 3) [ "agg" ]
+      guardLocCase "eloc_tuple" (peelFn "" "(s, 1)" + "let (s, one) = agg(keys, vals)\n") bl8003 (Some 3) [ "agg" ]
+      guardLocCase "eloc_plain" (peelFn " -> Int64" "reduce(s, (+))" + "let t = agg(keys, vals)\n") bl8003 (Some 3) [ "agg" ]
+      guardLocCase "mloc_tuple" (matchFn "" mGuard "(m, m + 1)" + "let (a, b) = cls(4, 1)\n") bl8002 (Some 1) [ "cls" ]
+      guardLocCase "mloc_plain" (matchFn " -> Int64" mGuard "m + 1" + "let a = cls(4, 1)\n") bl8002 (Some 1) [ "cls" ]
+      guardLocCase "ord1" (matchFn "" (mGuard + dGuard) "(m, q)" + "let (a, b) = cls(4, 0)\n") bl8002 (Some 1) [ "cls" ]
+      guardLocCase "ord2" (matchFn "" (dGuard + mGuard) "(m, q)" + "let (a, b) = cls(4, 0)\n") bl8013 (Some 2) [ "cls" ]
+      guardLocCase "cast_tuple" (castFn "" "(n, n + 1)" + "let (a, b) = h(zz / zz)\n") bl8014 (Some 2) [ "h" ]
+      guardLocCase "cast_plain" (castFn " -> Int64" "n + 1" + "let a = h(zz / zz)\n") bl8014 (Some 2) [ "h" ]
+      guardLocCase "nested" (matchFn "" mGuard "(m, m)" + "function outer(i: Int64) -> Int64 = {\n    let (x, y) = cls(i, 1)\n    x + y\n}\nlet a = outer(4)\n") bl8002 (Some 1) [ "cls"; "outer" ]
+      guardLocCase "lam_in_fn" "type R = Idx<3>\nfunction f(k: Int64) = {\n    let v = method_for(range<R>) <@> lambda(i) -> match Int64(i) + k with\n        | 5 -> Int64(1)\n    |> compute\n    (v, Int64(1))\n}\nlet (a, b) = f(1)\n" bl8002 (Some 2) [ "f" ]
+      guardLocCase "let_lambda" "let k = lambda(i: Int64) -> match i with\n    | 5 -> Int64(1)\nlet base = Int64([10, 20, 30])\nlet a = k(base(0) - 6)\n" bl8002 (Some 1) [ "k" ]
+      guardLocCase "block_tuple" (blockFn true) bl8002 None [ "cap" ]
+      guardLocCase "block_plain" (blockFn false) bl8002 None [ "cap" ]
+      guardLocCase "a7c_default" a7cSource bl8002 (Some 5) [ "kernel" ]
+      { guardLocCase "a7c_kept_inline" a7cSource bl8002 (Some 5) [ "kernel" ] with Extra = [ ("BLADE_EPILOGUE_LEGS", "1") ] }
+      // W4B-D (the second Codex look of W4-3, NEW 4): a PROGRAM-WRITTEN
+      // name that merely starts with `lambda` is a named callable, located
+      // at its own declaration in every lane (the interpreter's
+      // anonymous test used to be a prefix test)
+      guardLocCase "lname_tuple" ((matchFn "" mGuard "(m, m + 1)").Replace("function cls(", "function lambda_guard(") + "let (a, b) = lambda_guard(4, 1)\n") bl8002 (Some 1) [ "lambda_guard" ]
+      guardLocCase "lname_plain" ((matchFn " -> Int64" mGuard "m + 1").Replace("function cls(", "function lambda_guard(") + "let a = lambda_guard(4, 1)\n") bl8002 (Some 1) [ "lambda_guard" ]
+      guardLocCase "lname_let" "let lambda_kernel = lambda(i: Int64) -> match i with\n    | 5 -> Int64(1)\nlet base = Int64([10, 20, 30])\nlet a = lambda_kernel(base(0) - 6)\n" bl8002 (Some 1) [ "lambda_kernel" ]
+      // ...and a MULTI-MODULE program (NEW 3): a guard raised in an
+      // IMPORTED function's body is located at that function's line in
+      // ITS file (GuardLib.blade, written below) -- module qualification
+      // copies the program record, and the declaration table travels in
+      // it -- through a destructuring call, a plain call (BL8002) and a
+      // ragged peel (BL8003)
+      guardLocCase "mm_tuple" "import GuardLib\nlet (a, b) = GuardLib.classify(4)\n" bl8002 (Some 3) [ "classify" ]
+      guardLocCase "mm_plain" "import GuardLib\nlet a = GuardLib.pick(4)\n" bl8002 (Some 8) [ "pick" ]
+      guardLocCase "mm_peel" "import GuardLib\nlet keys: Array<GuardLib.Region like GuardLib.Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like GuardLib.Row> = [1, 2, 3, 4]\nlet t = GuardLib.agg(keys, vals)\n" bl8003 (Some 15) [ "agg" ]
+      // an IMPORTED fold kernel folded in a `where repro` body runs its repro
+      // TWIN (gap G80): the first failure, its location in the defining
+      // module's file and the frames are the origin's
+      guardLocCase "mm_fold" "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.idiv, 100)\nlet s = folded()\n" bl8013 (Some 21) [ "idiv"; "folded" ]
+      // ...and a GUARD in the twin, located at the ORIGIN's declaration (the
+      // twin's span is copied from it after module qualification)
+      // a guard in a NAMED fold kernel used OUTSIDE a repro body: the C++ lane
+      // calls the function, so it is located at its declaration -- the LLVM
+      // lane, which inlines the kernel, used to say the fold's line (W4B-D
+      // found it; EmitLlvm.applyKernelFramed now takes the callee's declaration)
+      guardLocCase "fk_local" "let w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction gsel(a: Int64, b: Int64) -> Int64 = {\n    let m: Int64 = match b with\n        | 5 -> 1\n    a + m\n}\nfunction folded() -> Int64 = reduce(w, gsel, 100)\nlet s = folded()\n" bl8002 (Some 2) [ "gsel"; "folded" ]
+      guardLocCase "mm_foldguard" "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.gsel, 100)\nlet s = folded()\n" bl8002 (Some 22) [ "gsel"; "folded" ] ]
+
+// the imported module of the mm_ cases; its line numbers are pinned above
+let private guardLibSource =
+    "module GuardLib\n\nfunction classify(i: Int64) = {\n    let m: Int64 = match i with\n        | 5 -> 1\n    (m, m + 1)\n}\n"
+    + "function pick(i: Int64) -> Int64 = {\n    let m: Int64 = match i with\n        | 5 -> 1\n    m + 1\n}\n"
+    + "type Region = Idx<3>\ntype Row = Idx<4>\n"
+    + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) -> Int64 = {\n"
+    + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
+    + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
+    + "    reduce(s, (+))\n}\n"
+    + "function idiv(a: Int64, b: Int64) -> Int64 = a / b\n"
+    + "function gsel(a: Int64, b: Int64) -> Int64 = {\n    let m: Int64 = match b with\n        | 5 -> 1\n    a + m\n}\n"
+
+/// One guard-location fixture through every lane and gate and the interpreter.
+let private groupAggGuardLocation (ctx: CliSmokeContext) (dir: string) (row: GuardLocCase) : unit =
+    let { Fixture = prog; Source = src; ErrorLine = errLine; Line = line; Frames = frames; Extra = extra } = row
+    let locFileOf (prog: string) = if prog.StartsWith "mm_" then "GuardLib" else prog
+    let failureLines (e: string) =
+        e.Replace("\r\n", "\n").Split('\n')
+        |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
+        |> Array.filter (fun l -> l.StartsWith "error[" || l.StartsWith "  --> " || l.StartsWith "  at ")
+        |> List.ofArray
+    // the `-->` path names the file as each lane was given it: compare its file name
+    let normLoc (l: string) =
+        if l.StartsWith "  --> " then "  --> " + Path.GetFileName(l.Substring 6) else l
+    File.WriteAllText(Path.Combine(dir, prog + ".blade"), src)
+    let wantLines =
+        [ errLine ]
+        @ (match line with Some n -> [ $"  --> {locFileOf prog}.blade:{n}" ] | None -> [])
+        @ (frames |> List.map (fun f -> "  at " + f))
+    let laneLines =
+        [ for llvm in [ null; "1" ] do
+            for gate in [ null; "0" ] do
+                let (c, o, e, oe) = groupAggRun ctx dir prog (groupAggEnv llvm gate false extra)
+                let tag = $"""{groupAggLaneOf llvm}, gate {(if isNull gate then "on" else "off")}"""
+                yield (tag, c <> 0 && groupAggRouteOk llvm oe, failureLines (o + "\n" + e) |> List.map normLoc) ]
+    let interpLines =
+        let path = Path.Combine(dir, prog + ".blade")
+        let guards = extra |> List.map (fun (k, v) -> let prior = Environment.GetEnvironmentVariable k in Environment.SetEnvironmentVariable(k, v); (k, prior))
+        try
+            match fst (Blade.Lowering.lowerFileDiag path src) with
+            | Error _ -> ("interpreter", false, [ "<lowering failed>" ])
+            | Ok (ir, _) ->
+                // the program is run AFTER another program's lowering
+                // replaced this flow's ambient declaration table, and in
+                // ANOTHER flow (a Task, as the interpreter differential
+                // runs it): the table it locates guards from is the one
+                // the program carries (IRProgram.DeclSpans), never an
+                // ambient one (the second Codex look of W4-3, NEW 3)
+                Blade.Lowering.lower "function decoy(i: Int64) -> Int64 = i + 1\nlet zz = decoy(1)\n" |> ignore
+                let res =
+                    System.Threading.Tasks.Task.Run(fun () ->
+                        Blade.Interp.Run.runProgram ir prog Blade.Interp.Value.defaultLimits).Result
+                ("interpreter", res.ExitCode <> 0, failureLines res.Stderr |> List.map normLoc)
+        finally
+            for (k, prior) in guards do Environment.SetEnvironmentVariable(k, prior)
+    let all = laneLines @ [ interpLines ]
+    let bad = all |> List.filter (fun (_, ran, ls) -> not ran || ls <> wantLines)
+    let (_, _, firstLines) = all.Head
+    ctx.RecordCase $"""cli: guard location ({prog}) G76: ONE failure text in C++ / LLVM (gate on and off) and the interpreter: [{String.concat " | " (wantLines |> List.map (fun l -> l.Trim()))}]"""
+        bad.IsEmpty
+        (match bad with
+         | (tag, ran, ls) :: _ -> $"""{tag}: ran={ran}: {String.concat " | " ls}"""
+         | [] -> String.concat " | " firstLines)
+
+/// ...and the PLANNED paths those fixtures cross (the second Codex look
+/// of W4-3, NEW 5): T3's aggregate-only grouping APPLIES to the
+/// gk / peel fixtures with the gate on (so the planned guards are the
+/// ones located) and is disabled with it off; the A7c fixture records
+/// NO applied producer-input-leg plan in either arm -- its callee may
+/// fail, so the call stays a call and its guard the function's. (mm_peel's
+/// imported gg is NOT a T3 path: its key is a parameter whose call site is
+/// in another module, which v1 does not audit -- the ordinary peel runs.)
+let private groupAggGuardPlans (ctx: CliSmokeContext) (dir: string) : unit =
+    for prog in [ "gloc_tuple"; "gloc_plain"; "eloc_tuple"; "eloc_plain" ] do
+        let fn = "agg"
+        let on = groupAggPlanned ctx dir prog fn (groupAggEnv null null false [])
+        let off = groupAggPlanned ctx dir prog fn (groupAggEnv null "0" false [])
+        ctx.RecordCase $"cli: guard location ({prog}) G76: T3's grouping is the planned path -- applied with the gate on, disabled off"
+            (on = "applied" && off = "disabled") $"on: {on}; off: {off}"
+    // A7c: the plan RUNS (exit 0) and says what it did with the region --
+    // the sibling pass joins the two INPUT folds (`reduce(x, (+)) +
+    // reduce(y, (+))`, applied, 2 folds) WITHOUT inlining `kernel` (a
+    // callee that may fail is not inlined, so there is no producer for
+    // A7c's legs to ride and no `[epilogue-legs v1]` record at all) --
+    // and no producer-input-leg plan is applied, in either arm
+    for (prog, extra) in [ ("a7c_default", []); ("a7c_kept_inline", [ ("BLADE_EPILOGUE_LEGS", "1") ]) ] do
+        let (code, o, e) = ctx.SpawnWith (groupAggEnv null null false extra) dir [ "plan"; $"{prog}.blade" ]
+        let ls = (o + e).Replace("\r\n", "\n").Split('\n')
+        let sibling = ls |> Array.filter (fun l -> l.Contains "[sibling-folds v1]" && l.Contains ": applied [2 folds over ")
+        let legs = ls |> Array.filter (fun l -> l.Contains "[epilogue-legs v1]")
+        let applied = legs |> Array.filter (fun l -> l.Contains ": applied [")
+        let ok = code = 0 && sibling.Length = 1 && Array.isEmpty applied
+        ctx.RecordCase $"cli: guard location ({prog}) G76: the plan runs, joins the two input folds without inlining the failing callee, and applies no producer-input-leg plan"
+            ok
+            $"plan exit {code}; sibling joins applied: {sibling.Length}; epilogue-legs records {legs.Length}, applied {applied.Length}"
+
+/// One arm of the cancellation fixture: its gate and FP regime, the value
+/// each lane must print (with its bits) and the plan it must record.
+type private CancelArm =
+    { Arm: string
+      Gate: string
+      Repro: bool
+      WantCpp: string
+      WantLlvm: string
+      Plan: string }
+
+// prodsum(s, s) with s = (the 1e16 group's sum, 1.0): the chain
+// gives 2 for the first group (5.0 in all); today's C++ K-lane
+// form gives 0 (1.0); the LLVM lane's flagged recurrence gives 2.
+let private cancelFive = "checksum = 5.0 #4014000000000000"
+let private cancelOne = "checksum = 1.0 #3ff0000000000000"
+
+let private cancelArms : CancelArm list =
+    [ { Arm = "strict, gate on"; Gate = null; Repro = true; WantCpp = cancelFive; WantLlvm = cancelFive; Plan = "applied" }
+      { Arm = "strict, gate off"; Gate = "0"; Repro = true; WantCpp = cancelFive; WantLlvm = cancelFive; Plan = "disabled" }
+      { Arm = "default build, gate on (declined)"; Gate = null; Repro = false; WantCpp = cancelOne; WantLlvm = cancelFive; Plan = "declined" }
+      { Arm = "default build, gate off"; Gate = "0"; Repro = false; WantCpp = cancelOne; WantLlvm = cancelFive; Plan = "declined" }
+      { Arm = "licensed arm"; Gate = "licensed"; Repro = false; WantCpp = cancelFive; WantLlvm = cancelFive; Plan = "applied" } ]
+
+/// THE CANCELLATION FIXTURE, every arm (review finding 6): exit 0,
+/// the route, and the exact expected value with its bits.
+let private groupAggCancellation (ctx: CliSmokeContext) (dir: string) (llvm: string) (arm: CancelArm) : unit =
+    let lane = groupAggLaneOf llvm
+    let env = groupAggEnv llvm arm.Gate arm.Repro []
+    let want = if isNull llvm then arm.WantCpp else arm.WantLlvm
+    let wantPlan = arm.Plan
+    let (c, o, _, oe) = groupAggRun ctx dir "gcancel" env
+    let p = groupAggPlanned ctx dir "gcancel" "agg" env
+    let got = o.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "checksum = ")
+    ctx.RecordCase $"cli: group aggregate ({lane}) cancellation fixture [1e16, -1e16, 1, 0, 0, 0, 0, 0, 1], {arm.Arm}: exit 0, route {lane}, plan {wantPlan}, value {want}"
+        (c = 0 && groupAggRouteOk llvm oe && p = wantPlan && got = Some want)
+        ($"exit {c}; plan {p}; got {got}")
+
 let private cliSmokeGroupAggregate (ctx: CliSmokeContext) : unit =
-    let { Record = record; RecordCase = recordCase; SpawnWith = spawnWith; SelfExe = selfExe } = ctx
+    let { Record = record; RecordCase = recordCase; SelfExe = selfExe } = ctx
     // --- AGGREGATE-ONLY GROUPING (Blade.Optimize.planGroupAggregate, round 3 W3-1, gap G71) ---
-    // (1) The key -> group map (blade_member.h, the C core both lanes run): a
-    // g++-built driver streams keys of several shapes (few / many distinct,
-    // Int64 extremes, a run of growth) and checks every answer against a
-    // first-occurrence std::unordered_map reference, that a new group's record
-    // is all-zero, that records written before a growth survive it, and that
-    // an injected allocation failure is REPORTED (init 0 / group -1, the map
-    // unchanged) and every free releases every allocation. (2) Run time: gate
+    // (1) The key -> group map (blade_member.h, the C core both lanes run):
+    // `groupAggGkmapDriver`. (2) Run time: gate
     // off vs on, per lane, comparing the COMPLETE output (exit status, stdout
     // with every Float64's raw bits through BLADE_PRINT_BITS, the complete
     // stderr of an abort) with the route and the plan asserted -- every state
@@ -1583,83 +2270,8 @@ let private cliSmokeGroupAggregate (ctx: CliSmokeContext) : unit =
         Directory.CreateDirectory dir |> ignore
         try
             Blade.CodeGen.deployRuntimeHeaders dir
-            let driver =
-                String.concat "\n"
-                    [ "#include <cstdio>"
-                      "#include <cstdint>"
-                      "#include <cstdlib>"
-                      "#include <vector>"
-                      "#include <unordered_map>"
-                      "static unsigned long long g_fail = 0;"
-                      "static int g_ord = 0, g_live = 0;"
-                      "static void* t_malloc(size_t n) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::malloc(n); if (p) g_live++; return p; }"
-                      "static void* t_calloc(size_t n, size_t s) { int k = g_ord++; if (k < 64 && ((g_fail >> k) & 1ull)) return nullptr; void* p = std::calloc(n, s); if (p) g_live++; return p; }"
-                      "static void t_free(void* p) { if (p) { g_live--; std::free(p); } }"
-                      "#define BLADE_MEMBER_MALLOC(b) t_malloc(b)"
-                      "#define BLADE_MEMBER_CALLOC(n, s) t_calloc((n), (s))"
-                      "#define BLADE_MEMBER_FREE(p) t_free(p)"
-                      "#include \"blade_member.h\""
-                      "static uint64_t s_ = 0x2545F4914F6CDD1Dull;"
-                      "static uint64_t nx() { s_ ^= s_ << 13; s_ ^= s_ >> 7; s_ ^= s_ << 17; return s_; }"
-                      "int main() {"
-                      "    const int64_t ex[] = {INT64_MIN, INT64_MAX, 0, -1, 1, INT64_MIN + 1, INT64_MAX - 1};"
-                      "    const int distinct[] = {1, 2, 15, 16, 17, 1009, 100003};"
-                      "    long rows = 0, bad = 0;"
-                      "    for (int shape = 0; shape < 3; shape++)"
-                      "    for (int di = 0; di < 7; di++) {"
-                      "        const int d = distinct[di];"
-                      "        std::vector<int64_t> pool((size_t)d);"
-                      "        for (int i = 0; i < d; i++) pool[i] = shape == 0 ? (int64_t)i * 7919 + 13 : shape == 1 ? (int64_t)nx() : ex[i % 7] ^ (int64_t)(i / 7);"
-                      "        blade_gkmap_i64 t;"
-                      "        g_fail = 0; g_ord = 0; g_live = 0;"
-                      "        if (!blade_gkmap_init_i64(&t, 3)) { bad++; continue; }"
-                      "        std::unordered_map<int64_t, int64_t> ref;"
-                      "        const int n = d * 3 + 11;"
-                      "        for (int r = 0; r < n; r++) {"
-                      "            int64_t k = pool[(size_t)(r < d ? r : (int)(nx() % (uint64_t)d))];"
-                      "            auto it = ref.find(k);"
-                      "            int64_t want = it == ref.end() ? (int64_t)ref.size() : it->second;"
-                      "            if (it == ref.end()) ref.emplace(k, want);"
-                      "            int64_t g = blade_gkmap_group_i64(&t, k);"
-                      "            if (g != want) { bad++; if (bad < 5) std::printf(\"BAD group d=%d r=%d got %lld want %lld\\n\", d, r, (long long)g, (long long)want); continue; }"
-                      "            blade_gk_slot* rec = blade_gkmap_record_i64(&t, g);"
-                      "            if (rec[0].i == 0 && (rec[1].i != 0 || rec[2].d != 0.0)) bad++;"
-                      "            rec[0].i++; rec[1].i += k; rec[2].d += 1.0;"
-                      "            rows++;"
-                      "        }"
-                      "        if (blade_gkmap_count_i64(&t) != (int64_t)ref.size()) bad++;"
-                      "        // every record survived every growth: count, key sum, float count"
-                      "        for (auto& kv : ref) { blade_gk_slot* rec = blade_gkmap_record_i64(&t, kv.second); if (rec[0].i <= 0 || (double)rec[0].i != rec[2].d || (int64_t)((uint64_t)rec[0].i * (uint64_t)kv.first) != rec[1].i) bad++; }"
-                      "        blade_gkmap_free_i64(&t);"
-                      "        if (g_live != 0) { bad++; std::printf(\"BAD leak d=%d live=%d\\n\", d, g_live); }"
-                      "    }"
-                      "    // allocation failure: init's k-th allocation, then a growth's (table or records)"
-                      "    long reported = 0;"
-                      "    for (int k = 0; k < 4; k++) {"
-                      "        blade_gkmap_i64 t; g_fail = 1ull << k; g_ord = 0; g_live = 0;"
-                      "        if (blade_gkmap_init_i64(&t, 2)) bad++; else reported++;"
-                      "        if (g_live != 0) bad++;"
-                      "    }"
-                      "    for (int k = 4; k < 12; k++) {"
-                      "        blade_gkmap_i64 t; g_fail = 0; g_ord = 0; g_live = 0;"
-                      "        if (!blade_gkmap_init_i64(&t, 2)) { bad++; continue; }"
-                      "        g_fail = 1ull << k;"
-                      "        int64_t last = 0, failedAt = -1;"
-                      "        for (int64_t key = 0; key < 200; key++) { last = blade_gkmap_group_i64(&t, key * 31); if (last < 0) { failedAt = key; break; } }"
-                      "        if (failedAt < 0) bad++; else {"
-                      "            reported++;"
-                      "            if (blade_gkmap_count_i64(&t) != failedAt) bad++;"
-                      "            for (int64_t key = 0; key < failedAt; key++) if (blade_gkmap_group_i64(&t, key * 31) != key) bad++;"
-                      "        }"
-                      "        blade_gkmap_free_i64(&t);"
-                      "        if (g_live != 0) bad++;"
-                      "    }"
-                      "    std::printf(\"GKMAP CORE: %ld rows, %ld failures reported, %ld bad\\n\", rows, reported, bad);"
-                      "    return bad == 0 ? 0 : 1;"
-                      "}"
-                      "" ]
             let drv = Path.Combine(dir, "gkmap_core.cpp")
-            File.WriteAllText(drv, driver)
+            File.WriteAllText(drv, groupAggGkmapDriver)
             (match Build.compileCpp drv dir with
              | Error e -> recordCase "group aggregate: the key -> group map (blade_member.h) driver" false e
              | Ok exe ->
@@ -1678,490 +2290,18 @@ let private cliSmokeGroupAggregate (ctx: CliSmokeContext) : unit =
             // the plan asserted applied (gate on) / disabled (gate off) by
             // `blade plan`, in the identity regime (BLADE_FP_REPRO=1
             // BLADE_FP_CONTRACT=off) unless named otherwise.
-            let gen =
-                "function gen(k: Int64, seed: Int64) -> Float64 = {\n"
-                + "    let h1 = ((k + seed) * 1103515245 + 12345) % 2147483648\n"
-                + "    let h2 = (h1 * (h1 / 4096 + 1)) % 2147483648\n"
-                + "    2.0 * (Float64(h2) / 2147483648.0)\n"
-                + "}\n"
-            // a scalar fingerprint over random data, positional and dynamic
-            let prog (keyType: string) (keyExpr: string) =
-                "type Ix = Idx<3001>\ntype G = Idx<37>\n" + gen
-                + $"function agg(k: Array<{keyType} like Ix>, x: Array<Float64 like Ix>) -> Float64 = {{\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
-                + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
-                + "    let t = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a * 0.75 + b, 0.5) |> compute\n"
-                + "    prodsum(s, s) + reduce(q, (+)) + reduce(t, (+))\n}\n"
-                + $"let keys = method_for(range<Ix>) <@> lambda(i) -> {keyExpr} |> compute\n"
-                + "let xs = method_for(range<Ix>) <@> lambda(i) -> gen(Int64(i), 20000038) |> compute\n"
-                + "let checksum = agg(keys, xs)\n"
-            File.WriteAllText(Path.Combine(dir, "gpos.blade"), prog "G" "Int64(floor(gen(Int64(i), 10000019) * 18.5))")
-            File.WriteAllText(Path.Combine(dir, "gdyn.blade"), prog "Int64" "7919 * Int64(floor(gen(Int64(i), 10000019) * 18.5)) + 13")
-            // EVERY state printed per group: the four state machines; signed
-            // zeros (an all -0.0 group, a -0.0 seed); a singleton at the FINAL
-            // row (group 3); a nonzero seed; the ordered non-commutative Int64
-            // fold, seeded and unseeded; cancellation inside a group (1e16,
-            // -1e16, 1.0); a positional EMPTY group (4) for the seeded, prodsum
-            // and count states. Positional, so both lanes route it.
-            let statesBody (regimeKeys: string) (keyType: string) =
-                "type Row = Idx<9>\n" + regimeKeys
-                + $"function st(k: Array<{keyType} like Row>, x: Array<Float64 like Row>, w: Array<Int64 like Row>) = {{\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n    let gw = group_by(w, gk)\n"
-                + "    let t = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+), 0.75) |> compute\n"
-                + "    let z = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> a + b, -0.0) |> compute\n"
-                + "    let q = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> prodsum(r, r) |> compute\n"
-                + "    let n = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
-                + "    let f = method_for(gw) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b, 5) |> compute\n"
-                + "    (t, z, q, n, f)\n}\n"
-                + "let x: Array<Float64 like Row> = [-0.0, 1e16, -0.0, 0.1, -1e16, 0.2, -0.0, 1.0, -0.0]\n"
-                + "let w: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
-                + "let (t, z, q, n, f) = st(keys, x, w)\n"
-            File.WriteAllText(Path.Combine(dir, "gstates.blade"),
-                statesBody "type G = Idx<5>\nlet keys: Array<G like Row> = [0, 1, 0, 2, 1, 2, 0, 1, 3]\n" "G")
-            // the UNSEEDED machine over the same data (no empty group: an
-            // unseeded empty group is the BL8003 fixture below)
-            File.WriteAllText(Path.Combine(dir, "gunseeded.blade"),
-                "type Row = Idx<9>\ntype G = Idx<4>\n"
-                + "function un(k: Array<G like Row>, x: Array<Float64 like Row>, w: Array<Int64 like Row>) = {\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n    let gw = group_by(w, gk)\n"
-                + "    let u = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
-                + "    let f = method_for(gw) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
-                + "    (u, f)\n}\n"
-                + "let keys: Array<G like Row> = [0, 1, 0, 2, 1, 2, 0, 1, 3]\n"
-                + "let x: Array<Float64 like Row> = [-0.0, 1e16, -0.0, 0.1, -1e16, 0.2, -0.0, 1.0, -0.0]\n"
-                + "let w: Array<Int64 like Row> = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
-                + "let (u, f) = un(keys, x, w)\n")
-            // the dynamic regime's arrays (the LLVM lane refuses a function's
-            // dynamic-extent array result -- pre-existing -- so C++ only)
-            File.WriteAllText(Path.Combine(dir, "gdynstates.blade"),
-                statesBody "let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 9, 7, 3, 11]\n" "Int64")
-            File.WriteAllText(Path.Combine(dir, "gcancel.blade"),
-                "type Row = Idx<12>\n"
-                + "function agg(k: Array<Int64 like Row>, x: Array<Float64 like Row>) -> Float64 = {\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(x, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
-                + "    prodsum(s, s)\n}\n"
-                + "let keys: Array<Int64 like Row> = [5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6]\n"
-                + "let xs: Array<Float64 like Row> = [1e16, -1e16, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1e8, -1e8, 1.0]\n"
-                + "let checksum = agg(keys, xs)\n")
-            // COMPLETE-FAILURE fixtures (review finding 4): 066's unseeded
-            // empty group (BL8003 at the peel), 073's positional key past the
-            // last group (BL8006 at the grouping), 074's intervening BL8013 --
-            // tuple results, so the LLVM lane routes them too.
-            File.WriteAllText(Path.Combine(dir, "f066.blade"),
-                "type Region = Idx<3>\ntype Row = Idx<4>\n"
-                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
-                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
-                + "    (n, s)\n}\n"
-                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet (n, s) = agg(keys, vals)\n")
-            File.WriteAllText(Path.Combine(dir, "f073.blade"),
-                "type Region = Idx<3>\ntype Row = Idx<5>\n"
-                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n"
-                + "    (s, s)\n}\n"
-                + "let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute\n"
-                + "let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\nlet (s, s2) = agg(keys, vals)\n")
-            File.WriteAllText(Path.Combine(dir, "f074.blade"),
-                "type Region = Idx<3>\ntype Row = Idx<4>\n"
-                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>, d: Int64) = {\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n    let z = 10 / d\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
-                + "    (z, s)\n}\n"
-                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\nlet (z, s) = agg(keys, vals, 0)\n")
-            // FINDING 1's producers: a COUNT-only and an UNUSED grouped array
-            // whose producer FAILS (10 / 0). Module-level deferred (`lazy`):
-            // declined (not proved stored), as written in both gates; the LLVM
-            // lane refuses the deferred module read (pre-existing) and the C++
-            // lane runs. Body producer (`|> compute`d at its own site, so
-            // stored and admitted): the producer fails at its own statement,
-            // before the grouping, in both gates and both lanes.
-            let lazyHead = "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet lazy = method_for(den) <@> lambda(d) -> 10 / d\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
-            File.WriteAllText(Path.Combine(dir, "wcount.blade"),
-                lazyHead + "function counts(key: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(lazy, gk)\n"
-                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k)\n")
-            File.WriteAllText(Path.Combine(dir, "wunused.blade"),
-                lazyHead + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>) -> Int64 = {\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(lazy, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v)\n")
-            let bodyHead = "type Two = Idx<2>\nlet den: Array<Int64 like Two> = [1, 0]\nlet k: Array<Int64 like Two> = [7, 7]\nlet v: Array<Int64 like Two> = [3, 4]\n"
-            File.WriteAllText(Path.Combine(dir, "wbodycount.blade"),
-                bodyHead + "function counts(key: Array<Int64 like Two>, dd: Array<Int64 like Two>) -> Int64 = {\n    let p = method_for(dd) <@> lambda(d) -> 10 / d |> compute\n    let gk = group_keys(key)\n    let g = group_by(p, gk)\n"
-                + "    let n = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> extents(r) |> compute\n    reduce(n, (+))\n}\nlet total = counts(k, den)\n")
-            File.WriteAllText(Path.Combine(dir, "wbodyunused.blade"),
-                bodyHead + "function sums(key: Array<Int64 like Two>, x: Array<Int64 like Two>, dd: Array<Int64 like Two>) -> Int64 = {\n    let p = method_for(dd) <@> lambda(d) -> 10 / d |> compute\n    let gk = group_keys(key)\n    let g = group_by(x, gk)\n    let unused = group_by(p, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n    reduce(s, (+))\n}\nlet total = sums(k, v, den)\n")
-            // FINDING 2's type witness: a singleton Int64 group of
-            // 9007199254740993 and a multirow one, folded by a Float64-valued
-            // kernel into an Int64 aggregate. The plan declines; each lane's
-            // own outcome is identical in both gates (the C++ lane rejects the
-            // emitted conversion, BL9002, and the LLVM lane rounds through
-            // double -- a pre-existing ordinary-fold typing discrepancy,
-            // recorded in gap G71, not fixed here).
-            File.WriteAllText(Path.Combine(dir, "wtype.blade"),
-                "type Row = Idx<3>\ntype Region = Idx<2>\n"
-                + "function f(k: Array<Region like Row>, v: Array<Int64 like Row>) = {\n    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> Float64(a) + Float64(b)) |> compute\n    (s, s)\n}\n"
-                + "let keys: Array<Region like Row> = [0, 1, 1]\nlet vals: Array<Int64 like Row> = [9007199254740993, 9007199254740993, 2]\nlet (s, s2) = f(keys, vals)\n")
-            let laneOf (llvm: string) = if isNull llvm then "C++" else "LLVM"
-            let routedLl (oe: string) = oe.Contains ".ll" && not (oe.Contains "falling back to C++")
-            let routeOk (llvm: string) (oe: string) = if isNull llvm then not (oe.Contains ".ll") else routedLl oe
-            let envOf (llvm: string) (gate: string) (repro: bool) (extra: (string * string) list) =
-                [ ("BLADE_BLAS", "off"); ("BLADE_LLVM", llvm); ("BLADE_GROUP_AGG", gate)
-                  ("BLADE_FP_REPRO", (if repro then "1" else null))
-                  ("BLADE_FP_CONTRACT", (if repro then "off" else null))
-                  ("BLADE_PRINT_BITS", "1") ] @ extra
-            /// (exit, stdout, stderr) of one run, the build's `--verbose` lines stripped from stderr
-            let runIt (prog: string) (env: (string * string) list) =
-                let (c, o, e) = spawnWith env dir [ "run"; $"{prog}.blade"; "--verbose" ]
-                let strip (s: string) =
-                    s.Replace("\r\n", "\n").Split('\n')
-                    |> Array.filter (fun l -> not (l.StartsWith "[Emit]" || l.StartsWith "[Build]" || l.StartsWith "[cache]" || l.Contains " completed in "))
-                    |> String.concat "\n"
-                (c, strip o, strip e, o + e)
-            let planned (prog: string) (fn: string) (env: (string * string) list) =
-                let (_, o, e) = spawnWith env dir [ "plan"; $"{prog}.blade" ]
-                let t = o + e
-                if t.Contains $"[group-aggregate v1] {fn} @ " && t.Contains $"[group-aggregate v1] {fn} @ " then
-                    let line = t.Replace("\r\n", "\n").Split('\n') |> Array.find (fun l -> l.Contains $"[group-aggregate v1] {fn} @ ")
-                    if line.Contains ": applied [" then "applied" elif line.Contains "disabled by BLADE_GROUP_AGG" then "disabled" else "declined"
-                else "no record"
-            let planLine (prog: string) (fn: string) (env: (string * string) list) =
-                let (_, o, e) = spawnWith env dir [ "plan"; $"{prog}.blade" ]
-                (o + e).Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.Contains $"[group-aggregate v1] {fn} @ ") |> Option.defaultValue ""
-            /// Gate off vs on, one lane: identical exit, stdout (raw bits) and
-            /// stderr; route; the plan applied on / disabled off (or the
-            /// expected decline in both); an abort fixture also pins its
-            /// expected code in BOTH gates, so a build failure (BL9002) or any
-            /// other abort cannot stand in for the intended run-time one.
-            let gateIdentity (prog: string) (fn: string) (llvm: string) (expectPlan: string) (expectExit: int -> bool) (expectCode: string option) (what: string) =
-                let lane = laneOf llvm
-                let (c0, o0, e0, oe0) = runIt prog (envOf llvm "0" true [])
-                let (c1, o1, e1, oe1) = runIt prog (envOf llvm null true [])
-                let p0 = planned prog fn (envOf llvm "0" true [])
-                let p1 = planned prog fn (envOf llvm null true [])
-                let planOk = if expectPlan = "applied" then p0 = "disabled" && p1 = "applied" else p1 = expectPlan
-                let codeOk =
-                    match expectCode with
-                    | Some code -> (o0 + e0).Contains $"error[{code}]" && (o1 + e1).Contains $"error[{code}]" && not ((o1 + e1).Contains "error[BL9002]")
-                    | None -> true
-                let ok = c0 = c1 && expectExit c1 && o0 = o1 && e0 = e1 && routeOk llvm oe0 && routeOk llvm oe1 && planOk && codeOk
-                let codeText = match expectCode with Some code -> $", code {code} in both gates" | None -> ""
-                recordCase $"cli: group aggregate ({lane}, {prog}) {what}: gate off == on (exit, stdout with raw bits, complete stderr), route {lane}, plan {expectPlan}{codeText}"
-                    ok ($"exit {c0}/{c1}; plan {p0}/{p1}; stdout same={o0 = o1}; stderr same={e0 = e1}; on: {o1.Trim()} {e1.Trim()}")
+            for (file, text) in groupAggFixtures do File.WriteAllText(Path.Combine(dir, file), text)
             for llvm in [ null; "1" ] do
-                gateIdentity "gpos" "agg" llvm "applied" ((=) 0) None "random positional data, scalar fingerprint"
-                gateIdentity "gdyn" "agg" llvm "applied" ((=) 0) None "random dynamic data, scalar fingerprint"
-                gateIdentity "gstates" "st" llvm "applied" ((=) 0) None "every state per group (seeded 0.75 / -0.0, prodsum, count, 3a+b seeded; signed zeros; final-row singleton; empty group)"
-                gateIdentity "gunseeded" "un" llvm "applied" ((=) 0) None "the unseeded machine per group (Float64 and the ordered 3a+b Int64; signed zeros; final-row singleton)"
-                gateIdentity "f066" "agg" llvm "applied" ((<>) 0) (Some "BL8003") "complete failure: unseeded empty group, BL8003 at the peel"
-                gateIdentity "f073" "agg" llvm "applied" ((<>) 0) (Some "BL8006") "complete failure: positional key past the last group, BL8006 at the grouping"
-                gateIdentity "f074" "agg" llvm "applied" ((<>) 0) (Some "BL8013") "complete failure: an intervening BL8013 before the peel's BL8003"
-                gateIdentity "wbodycount" "counts" llvm "applied" ((<>) 0) (Some "BL8013") "a failing (stored) producer of a COUNT-only grouped array fails at its own statement"
-                gateIdentity "wbodyunused" "sums" llvm "applied" ((<>) 0) (Some "BL8013") "a failing (stored) producer of an UNUSED grouped array fails at its own statement"
-            gateIdentity "gdynstates" "st" null "applied" ((=) 0) None "every state per group, the dynamic regime (C++ only: the LLVM lane refuses a function's dynamic-extent ARRAY result; gdyn's dynamic scalar and gcancel run both lanes)"
-            // the deferred-producer forms decline, so both gates run the CSR;
-            // the C++ lane, and the LLVM lane, which since W4B-B (gap G75)
-            // evaluates the deferred module map privately in the function body
-            // instead of refusing the read: the same BL8013, no fallback
-            for (prog, fn) in [ ("wcount", "counts"); ("wunused", "sums") ] do
-                let (c0, o0, e0, _) = runIt prog (envOf null "0" true [])
-                let (c1, o1, e1, _) = runIt prog (envOf null null true [])
-                let p1 = planned prog fn (envOf null null true [])
-                let (cl, oll, ell, ol) = runIt prog (envOf "1" null true [])
-                // the abort's identity, as the LLVM differential reads it: the
-                // first `error[...]` line and its `  --> file:line` location
-                // `blade run` relays the program's stderr behind a `[stderr]: `
-                // prefix, so the diagnostic is found by its `error[` token
-                let firstDiag (s: string) =
-                    let ls = s.Replace("\r\n", "\n").Split('\n')
-                    match ls |> Array.tryFindIndex (fun l -> l.Contains "error[") with
-                    | Some i ->
-                        let d = ls.[i].Substring(ls.[i].IndexOf "error[")
-                        let loc = if i + 1 < ls.Length && ls.[i + 1].TrimStart().StartsWith "-->" then ls.[i + 1].Trim() else "<no location>"
-                        d + " | " + loc
-                    | None -> "<no diagnostic>"
-                let dCpp = firstDiag (o1 + "\n" + e1)
-                let dLl = firstDiag (oll + "\n" + ell)
-                recordCase $"cli: group aggregate ({prog}) a DEFERRED failing producer of a count-only / unused grouped array: declined, BL8013 in both gates (C++) and in the LLVM lane (routed there, the same first diagnostic, location and exit)"
-                    (p1 = "declined" && c0 <> 0 && c0 = c1 && e0 = e1 && o0 = o1 && dCpp.StartsWith "error[BL8013]"
-                     && routedLl ol && cl = c1 && dLl = dCpp)
-                    ($"plan {p1}; exit {c0}/{c1}; LLVM exit {cl}; C++ [{dCpp}]; LLVM [{dLl}]")
-            // THE MIXED-TYPE FOLD (first look's finding 2; second look's HIGH):
-            // a Float64-valued kernel folded into an Int64 accumulator. Base
-            // split on it (the C++ lane BL9002, the LLVM lane rounding through
-            // double: 9007199254740992, 9007199254740994 for 9007199254740993);
-            // since R11 the lowering refuses it, BL3020 at one location, in both
-            // lanes and both gates (nothing is emitted, so no route to check).
-            // The group-aggregate type decline keeps its own fixture
-            // (OptimizeTests decision_group_agg_declined_mixed_type_fold).
-            let firstDiagLoc (s: string) =
-                let ls = s.Replace("\r\n", "\n").Split('\n')
-                match ls |> Array.tryFindIndex (fun l -> l.Contains "error[") with
-                | Some i ->
-                    let d = ls.[i].Substring(ls.[i].IndexOf "error[")
-                    let code = if d.Length >= 13 then d.Substring(0, 13) else d
-                    let loc = if i + 1 < ls.Length && ls.[i + 1].TrimStart().StartsWith "-->" then ls.[i + 1].Trim() else "<no location>"
-                    code + " | " + loc
-                | None -> "<no diagnostic>"
-            let wtypeRuns =
-                [ for llvm in [ null; "1" ] do
-                    for gate in [ "0"; null ] do
-                        let (c, o, e, _) = runIt "wtype" (envOf llvm gate true [])
-                        yield (c, firstDiagLoc (o + "\n" + e)) ]
-            let wtypeFirst = snd (List.head wtypeRuns)
-            recordCase "cli: group aggregate (wtype) a Float64-valued fold into an Int64 aggregate: refused BL3020 at one location in both lanes and both gates (R11)"
-                (wtypeRuns |> List.forall (fun (c, d) -> c <> 0 && d = wtypeFirst)
-                 && wtypeFirst.StartsWith "error[BL3020]" && not (wtypeFirst.EndsWith "<no location>"))
-                (wtypeRuns |> List.map (fun (c, d) -> $"exit {c}: {d}") |> String.concat "; ")
-            // THE INLINE EFFECTFUL KEY PRODUCER (Codex second look at e6eadfa2,
-            // BLOCKER): a top-level `group_keys` over an unforced inline map
-            // whose kernel bumps a captured counter. Every lane evaluates the
-            // producer once per CSR pass (pre-existing: calls = [6] over two
-            // rows and three passes); the LLVM lane's C-core map route is taken
-            // ONLY over a stored key pool, so this program keeps the linear scan
-            // (an unknown key lands in bucket 0: sizes = [2, 0]) and never
-            // numbers a group past the CSR it sized. The C++ lane refuses the
-            // program (BL7004, pre-existing). Per lane, both gates, routed.
-            File.WriteAllText(Path.Combine(dir, "winline.blade"),
-                "type One = Idx<1>\ntype Two = Idx<2>\nlet mut calls: Array<Int64 like One> = [0]\nlet rows: Array<Int64 like Two> = [0, 0]\n"
-                + "function next_key(c: mut Array<Int64 like One>, x: Int64) -> Int64 = {\n    c(0) = c(0) + 1\n    c(0)\n}\n"
-                + "let gk = group_keys(method_for(rows) <@> lambda(x) -> next_key(calls, x))\nlet sizes = extents(gk)\n")
+                for row in groupAggGateCases do groupAggGateIdentity ctx dir llvm row
+            for row in groupAggGateCppCases do groupAggGateIdentity ctx dir null row
+            groupAggDeferredProducers ctx dir
+            groupAggMixedTypeFold ctx dir
+            groupAggInlineKeyProducer ctx dir
+            File.WriteAllText(Path.Combine(dir, "GuardLib.blade"), guardLibSource)
+            for row in guardLocCases do groupAggGuardLocation ctx dir row
+            groupAggGuardPlans ctx dir
             for llvm in [ null; "1" ] do
-                let lane = laneOf llvm
-                let (c0, o0, e0, oe0) = runIt "winline" (envOf llvm "0" false [])
-                let (c1, o1, e1, oe1) = runIt "winline" (envOf llvm null false [])
-                let ok =
-                    if isNull llvm then
-                        c0 <> 0 && c1 <> 0 && (o0 + e0).Contains "error[BL7004]" && (o1 + e1).Contains "error[BL7004]" && o0 = o1 && e0 = e1
-                    else
-                        routedLl oe0 && routedLl oe1 && c0 = 0 && c1 = 0 && o0 = o1 && e0 = e1
-                        && o1.Contains "sizes = [2, 0]" && o1.Contains "calls = [6]"
-                let expectText = if isNull llvm then "BL7004 in both gates (the C++ lane refuses it, pre-existing)" else "routed, exit 0, sizes = [2, 0], calls = [6] in both gates (the linear scan: no group past the CSR)"
-                recordCase $"cli: group keys ({lane}, winline) an inline writing key producer: {expectText}"
-                    ok ($"exit {c0}/{c1}; {o1.Trim()} {e1.Trim()}")
-            // THE GUARD LOCATION RULE (gap G76), ONE failure text in all three
-            // lanes: a runtime guard panic (BL8002 non-exhaustive match, BL8003
-            // empty fold, BL8006 key) raised in the body of a callable the
-            // program NAMED -- a function, a let-bound lambda -- is located at
-            // that name's recorded declaration, through a plain `let x = f(..)`
-            // and a destructuring `let (a, b) = f(..)` alike (the LLVM lane
-            // INLINES a tuple-returning call: it used to locate the guard at the
-            // caller's binding, which a destructuring let does not have, and
-            // print no `-->` line); a block-local one has no recorded
-            // declaration and is located nowhere in every lane; an anonymous
-            // lambda's guard takes its enclosing declaration. An operator panic
-            // (BL8013 / BL8014) names its own line. The frames are the
-            // functions the program called, innermost first: the scalar ragged
-            // peel runs its kernel body INLINED in every lane (no `lambda in s`
-            // frame -- the LLVM lane used to push one). Each fixture's COMPLETE
-            // failure lines (error, `-->`, every frame, in order) are pinned and
-            // must be IDENTICAL in the C++ lane, the LLVM lane and the
-            // interpreter (run in-process on the lowered file, its declaration
-            // table installed from the program), gate on and off (T3's planned
-            // grouping and peels), and with the A7c kept inline requested
-            // (BLADE_EPILOGUE_LEGS=1: a callee that may fail is never inlined,
-            // so its guard keeps the function's location). The ORDER: ord1 /
-            // ord2 swap a match guard and a division.
-            let gkFn (ret: string) (tail: string) =
-                "type Region = Idx<3>\ntype Row = Idx<5>\n"
-                + $"function agg(k: Array<Region like Row>, v: Array<Int64 like Row>){ret} = {{\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+), 0) |> compute\n"
-                + $"    {tail}\n}}\n"
-                + "let keys = method_for(range<Row>) <@> lambda(i) -> (Int64(i) * 2) % 5 |> compute\n"
-                + "let vals: Array<Int64 like Row> = [1, 2, 3, 4, 5]\n"
-            let peelFn (ret: string) (tail: string) =
-                "type Region = Idx<3>\ntype Row = Idx<4>\n"
-                + $"function agg(k: Array<Region like Row>, v: Array<Int64 like Row>){ret} = {{\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
-                + $"    {tail}\n}}\n"
-                + "let keys: Array<Region like Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like Row> = [1, 2, 3, 4]\n"
-            let matchFn (ret: string) (body: string) (tail: string) = $"function cls(i: Int64, d: Int64){ret} = {{\n{body}    {tail}\n}}\n"
-            let mGuard = "    let m: Int64 = match i with\n        | 5 -> 1\n"
-            let dGuard = "    let q = 10 / d\n"
-            let castFn (ret: string) (tail: string) = $"function h(x: Float64){ret} = {{\n    let n = Int64(floor(x))\n    {tail}\n}}\nlet zz: Float64 = 0.0\n"
-            let a7c =
-                "type Ix = Idx<1003>\n"
-                + "function inputs(m: Int64) -> Array<Float64 like Ix> = {\n    method_for(range<Ix>) <@> lambda(i) -> Float64(Int64(i) % m) |> compute\n}\n"
-                + "function kernel(x: Array<Float64 like Ix>, y: Array<Float64 like Ix>, k: Int64) -> Float64 = {\n"
-                + "    let y2 = method_for(zip(x, y)) <@> lambda(u, v) -> 2.0 * u + v |> compute\n"
-                + "    let s = reduce(method_for(y2) <@> lambda(w) -> w * w, lambda(p, q) -> p + q, 0.0)\n"
-                + "    let m: Int64 = match k with\n        | 5 -> 1\n"
-                + "    s + Float64(m)\n}\n"
-                + "let (checksum, input_checksum) = {\n    let x = inputs(7)\n    let y = inputs(5)\n"
-                + "    (kernel(x, y, 4), reduce(x, (+)) + reduce(y, (+)))\n}\n"
-            let blockFn (destructure: bool) =
-                "let base = Int64([10, 20, 30])\nlet r = {\n    let k: Int64 = 0\n"
-                + "    function cap(i: Int64) = {\n        let q = base(1) / (i - k)\n        let m: Int64 = match q with\n            | 5 -> 1\n"
-                + (if destructure then "        (q, m)\n    }\n    let (u, v) = cap(5)\n    u + v\n}\n" else "        q + m\n    }\n    cap(5)\n}\n")
-            let bl8006 = "error[BL8006]: index out of bounds: a group_keys key outside 0 .. 2"
-            let bl8003 = "error[BL8003]: reduce: empty array, no reduction possible"
-            let bl8002 = "error[BL8002]: Blade: non-exhaustive match"
-            let bl8013 = "error[BL8013]: integer division by zero"
-            let bl8014 = "error[BL8014]: float-to-integer conversion of NaN or an out-of-range value"
-            // (fixture, source, error line, `-->` line (None = unlocated), frames, extra env)
-            let locCases =
-                [ ("gloc_tuple", gkFn "" "(s, 1)" + "let (s, one) = agg(keys, vals)\n", bl8006, Some 3, [ "agg" ], [])
-                  ("gloc_plain", gkFn " -> Int64" "reduce(s, (+))" + "let t = agg(keys, vals)\n", bl8006, Some 3, [ "agg" ], [])
-                  ("eloc_tuple", peelFn "" "(s, 1)" + "let (s, one) = agg(keys, vals)\n", bl8003, Some 3, [ "agg" ], [])
-                  ("eloc_plain", peelFn " -> Int64" "reduce(s, (+))" + "let t = agg(keys, vals)\n", bl8003, Some 3, [ "agg" ], [])
-                  ("mloc_tuple", matchFn "" mGuard "(m, m + 1)" + "let (a, b) = cls(4, 1)\n", bl8002, Some 1, [ "cls" ], [])
-                  ("mloc_plain", matchFn " -> Int64" mGuard "m + 1" + "let a = cls(4, 1)\n", bl8002, Some 1, [ "cls" ], [])
-                  ("ord1", matchFn "" (mGuard + dGuard) "(m, q)" + "let (a, b) = cls(4, 0)\n", bl8002, Some 1, [ "cls" ], [])
-                  ("ord2", matchFn "" (dGuard + mGuard) "(m, q)" + "let (a, b) = cls(4, 0)\n", bl8013, Some 2, [ "cls" ], [])
-                  ("cast_tuple", castFn "" "(n, n + 1)" + "let (a, b) = h(zz / zz)\n", bl8014, Some 2, [ "h" ], [])
-                  ("cast_plain", castFn " -> Int64" "n + 1" + "let a = h(zz / zz)\n", bl8014, Some 2, [ "h" ], [])
-                  ("nested", matchFn "" mGuard "(m, m)" + "function outer(i: Int64) -> Int64 = {\n    let (x, y) = cls(i, 1)\n    x + y\n}\nlet a = outer(4)\n", bl8002, Some 1, [ "cls"; "outer" ], [])
-                  ("lam_in_fn", "type R = Idx<3>\nfunction f(k: Int64) = {\n    let v = method_for(range<R>) <@> lambda(i) -> match Int64(i) + k with\n        | 5 -> Int64(1)\n    |> compute\n    (v, Int64(1))\n}\nlet (a, b) = f(1)\n", bl8002, Some 2, [ "f" ], [])
-                  ("let_lambda", "let k = lambda(i: Int64) -> match i with\n    | 5 -> Int64(1)\nlet base = Int64([10, 20, 30])\nlet a = k(base(0) - 6)\n", bl8002, Some 1, [ "k" ], [])
-                  ("block_tuple", blockFn true, bl8002, None, [ "cap" ], [])
-                  ("block_plain", blockFn false, bl8002, None, [ "cap" ], [])
-                  ("a7c_default", a7c, bl8002, Some 5, [ "kernel" ], [])
-                  ("a7c_kept_inline", a7c, bl8002, Some 5, [ "kernel" ], [ ("BLADE_EPILOGUE_LEGS", "1") ])
-                  // W4B-D (the second Codex look of W4-3, NEW 4): a PROGRAM-WRITTEN
-                  // name that merely starts with `lambda` is a named callable, located
-                  // at its own declaration in every lane (the interpreter's
-                  // anonymous test used to be a prefix test)
-                  ("lname_tuple", (matchFn "" mGuard "(m, m + 1)").Replace("function cls(", "function lambda_guard(") + "let (a, b) = lambda_guard(4, 1)\n", bl8002, Some 1, [ "lambda_guard" ], [])
-                  ("lname_plain", (matchFn " -> Int64" mGuard "m + 1").Replace("function cls(", "function lambda_guard(") + "let a = lambda_guard(4, 1)\n", bl8002, Some 1, [ "lambda_guard" ], [])
-                  ("lname_let", "let lambda_kernel = lambda(i: Int64) -> match i with\n    | 5 -> Int64(1)\nlet base = Int64([10, 20, 30])\nlet a = lambda_kernel(base(0) - 6)\n", bl8002, Some 1, [ "lambda_kernel" ], [])
-                  // ...and a MULTI-MODULE program (NEW 3): a guard raised in an
-                  // IMPORTED function's body is located at that function's line in
-                  // ITS file (GuardLib.blade, written below) -- module qualification
-                  // copies the program record, and the declaration table travels in
-                  // it -- through a destructuring call, a plain call (BL8002) and a
-                  // ragged peel (BL8003)
-                  ("mm_tuple", "import GuardLib\nlet (a, b) = GuardLib.classify(4)\n", bl8002, Some 3, [ "classify" ], [])
-                  ("mm_plain", "import GuardLib\nlet a = GuardLib.pick(4)\n", bl8002, Some 8, [ "pick" ], [])
-                  ("mm_peel", "import GuardLib\nlet keys: Array<GuardLib.Region like GuardLib.Row> = [0, 2, 0, 2]\nlet vals: Array<Int64 like GuardLib.Row> = [1, 2, 3, 4]\nlet t = GuardLib.agg(keys, vals)\n", bl8003, Some 15, [ "agg" ], [])
-                  // an IMPORTED fold kernel folded in a `where repro` body runs its repro
-                  // TWIN (gap G80): the first failure, its location in the defining
-                  // module's file and the frames are the origin's
-                  ("mm_fold", "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.idiv, 100)\nlet s = folded()\n", bl8013, Some 21, [ "idiv"; "folded" ], [])
-                  // ...and a GUARD in the twin, located at the ORIGIN's declaration (the
-                  // twin's span is copied from it after module qualification)
-                  // a guard in a NAMED fold kernel used OUTSIDE a repro body: the C++ lane
-                  // calls the function, so it is located at its declaration -- the LLVM
-                  // lane, which inlines the kernel, used to say the fold's line (W4B-D
-                  // found it; EmitLlvm.applyKernelFramed now takes the callee's declaration)
-                  ("fk_local", "let w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction gsel(a: Int64, b: Int64) -> Int64 = {\n    let m: Int64 = match b with\n        | 5 -> 1\n    a + m\n}\nfunction folded() -> Int64 = reduce(w, gsel, 100)\nlet s = folded()\n", bl8002, Some 2, [ "gsel"; "folded" ], [])
-                  ("mm_foldguard", "import GuardLib\nlet w: Array<Int64 like Idx<3>> = [4, 0, 2]\nfunction folded() where repro -> Int64 = reduce(w, GuardLib.gsel, 100)\nlet s = folded()\n", bl8002, Some 22, [ "gsel"; "folded" ], []) ]
-            // the imported module of the mm_ cases; its line numbers are pinned above
-            File.WriteAllText(Path.Combine(dir, "GuardLib.blade"),
-                "module GuardLib\n\nfunction classify(i: Int64) = {\n    let m: Int64 = match i with\n        | 5 -> 1\n    (m, m + 1)\n}\n"
-                + "function pick(i: Int64) -> Int64 = {\n    let m: Int64 = match i with\n        | 5 -> 1\n    m + 1\n}\n"
-                + "type Region = Idx<3>\ntype Row = Idx<4>\n"
-                + "function agg(k: Array<Region like Row>, v: Array<Int64 like Row>) -> Int64 = {\n"
-                + "    let gk = group_keys(k)\n    let g = group_by(v, gk)\n"
-                + "    let s = method_for(g) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, lambda(a, b) -> 3 * a + b) |> compute\n"
-                + "    reduce(s, (+))\n}\n"
-                + "function idiv(a: Int64, b: Int64) -> Int64 = a / b\n"
-                + "function gsel(a: Int64, b: Int64) -> Int64 = {\n    let m: Int64 = match b with\n        | 5 -> 1\n    a + m\n}\n")
-            let locFileOf (prog: string) = if prog.StartsWith "mm_" then "GuardLib" else prog
-            let failureLines (e: string) =
-                e.Replace("\r\n", "\n").Split('\n')
-                |> Array.map (fun l -> if l.StartsWith "[stderr]: " then l.Substring 10 else l)
-                |> Array.filter (fun l -> l.StartsWith "error[" || l.StartsWith "  --> " || l.StartsWith "  at ")
-                |> List.ofArray
-            // the `-->` path names the file as each lane was given it: compare its file name
-            let normLoc (l: string) =
-                if l.StartsWith "  --> " then "  --> " + Path.GetFileName(l.Substring 6) else l
-            for (prog, src, errLine, line, frames, extra) in locCases do
-                File.WriteAllText(Path.Combine(dir, prog + ".blade"), src)
-                let wantLines =
-                    [ errLine ]
-                    @ (match line with Some n -> [ $"  --> {locFileOf prog}.blade:{n}" ] | None -> [])
-                    @ (frames |> List.map (fun f -> "  at " + f))
-                let laneLines =
-                    [ for llvm in [ null; "1" ] do
-                        for gate in [ null; "0" ] do
-                            let (c, o, e, oe) = runIt prog (envOf llvm gate false extra)
-                            let tag = $"""{laneOf llvm}, gate {(if isNull gate then "on" else "off")}"""
-                            yield (tag, c <> 0 && routeOk llvm oe, failureLines (o + "\n" + e) |> List.map normLoc) ]
-                let interpLines =
-                    let path = Path.Combine(dir, prog + ".blade")
-                    let guards = extra |> List.map (fun (k, v) -> let prior = Environment.GetEnvironmentVariable k in Environment.SetEnvironmentVariable(k, v); (k, prior))
-                    try
-                        match fst (Blade.Lowering.lowerFileDiag path src) with
-                        | Error _ -> ("interpreter", false, [ "<lowering failed>" ])
-                        | Ok (ir, _) ->
-                            // the program is run AFTER another program's lowering
-                            // replaced this flow's ambient declaration table, and in
-                            // ANOTHER flow (a Task, as the interpreter differential
-                            // runs it): the table it locates guards from is the one
-                            // the program carries (IRProgram.DeclSpans), never an
-                            // ambient one (the second Codex look of W4-3, NEW 3)
-                            Blade.Lowering.lower "function decoy(i: Int64) -> Int64 = i + 1\nlet zz = decoy(1)\n" |> ignore
-                            let res =
-                                System.Threading.Tasks.Task.Run(fun () ->
-                                    Blade.Interp.Run.runProgram ir prog Blade.Interp.Value.defaultLimits).Result
-                            ("interpreter", res.ExitCode <> 0, failureLines res.Stderr |> List.map normLoc)
-                    finally
-                        for (k, prior) in guards do Environment.SetEnvironmentVariable(k, prior)
-                let all = laneLines @ [ interpLines ]
-                let bad = all |> List.filter (fun (_, ran, ls) -> not ran || ls <> wantLines)
-                let (_, _, firstLines) = all.Head
-                recordCase $"""cli: guard location ({prog}) G76: ONE failure text in C++ / LLVM (gate on and off) and the interpreter: [{String.concat " | " (wantLines |> List.map (fun l -> l.Trim()))}]"""
-                    bad.IsEmpty
-                    (match bad with
-                     | (tag, ran, ls) :: _ -> $"""{tag}: ran={ran}: {String.concat " | " ls}"""
-                     | [] -> String.concat " | " firstLines)
-            // ...and the PLANNED paths those fixtures cross (the second Codex look
-            // of W4-3, NEW 5): T3's aggregate-only grouping APPLIES to the
-            // gk / peel fixtures with the gate on (so the planned guards are the
-            // ones located) and is disabled with it off; the A7c fixture records
-            // NO applied producer-input-leg plan in either arm -- its callee may
-            // fail, so the call stays a call and its guard the function's. (mm_peel's
-            // imported gg is NOT a T3 path: its key is a parameter whose call site is
-            // in another module, which v1 does not audit -- the ordinary peel runs.)
-            for prog in [ "gloc_tuple"; "gloc_plain"; "eloc_tuple"; "eloc_plain" ] do
-                let fn = "agg"
-                let on = planned prog fn (envOf null null false [])
-                let off = planned prog fn (envOf null "0" false [])
-                recordCase $"cli: guard location ({prog}) G76: T3's grouping is the planned path -- applied with the gate on, disabled off"
-                    (on = "applied" && off = "disabled") $"on: {on}; off: {off}"
-            // A7c: the plan RUNS (exit 0) and says what it did with the region --
-            // the sibling pass joins the two INPUT folds (`reduce(x, (+)) +
-            // reduce(y, (+))`, applied, 2 folds) WITHOUT inlining `kernel` (a
-            // callee that may fail is not inlined, so there is no producer for
-            // A7c's legs to ride and no `[epilogue-legs v1]` record at all) --
-            // and no producer-input-leg plan is applied, in either arm
-            for (prog, extra) in [ ("a7c_default", []); ("a7c_kept_inline", [ ("BLADE_EPILOGUE_LEGS", "1") ]) ] do
-                let (code, o, e) = spawnWith (envOf null null false extra) dir [ "plan"; $"{prog}.blade" ]
-                let ls = (o + e).Replace("\r\n", "\n").Split('\n')
-                let sibling = ls |> Array.filter (fun l -> l.Contains "[sibling-folds v1]" && l.Contains ": applied [2 folds over ")
-                let legs = ls |> Array.filter (fun l -> l.Contains "[epilogue-legs v1]")
-                let applied = legs |> Array.filter (fun l -> l.Contains ": applied [")
-                let ok = code = 0 && sibling.Length = 1 && Array.isEmpty applied
-                recordCase $"cli: guard location ({prog}) G76: the plan runs, joins the two input folds without inlining the failing callee, and applies no producer-input-leg plan"
-                    ok
-                    $"plan exit {code}; sibling joins applied: {sibling.Length}; epilogue-legs records {legs.Length}, applied {applied.Length}"
-            // THE CANCELLATION FIXTURE, every arm (review finding 6): exit 0,
-            // the route, and the exact expected value with its bits.
-            // prodsum(s, s) with s = (the 1e16 group's sum, 1.0): the chain
-            // gives 2 for the first group (5.0 in all); today's C++ K-lane
-            // form gives 0 (1.0); the LLVM lane's flagged recurrence gives 2.
-            let five = "checksum = 5.0 #4014000000000000"
-            let one = "checksum = 1.0 #3ff0000000000000"
-            for llvm in [ null; "1" ] do
-                let lane = laneOf llvm
-                let arms =
-                    [ ("strict, gate on", envOf llvm null true [], five, "applied")
-                      ("strict, gate off", envOf llvm "0" true [], five, "disabled")
-                      ("default build, gate on (declined)", envOf llvm null false [], (if isNull llvm then one else five), "declined")
-                      ("default build, gate off", envOf llvm "0" false [], (if isNull llvm then one else five), "declined")
-                      ("licensed arm", envOf llvm "licensed" false [], five, "applied") ]
-                for (arm, env, want, wantPlan) in arms do
-                    let (c, o, _, oe) = runIt "gcancel" env
-                    let p = planned "gcancel" "agg" env
-                    let got = o.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "checksum = ")
-                    recordCase $"cli: group aggregate ({lane}) cancellation fixture [1e16, -1e16, 1, 0, 0, 0, 0, 0, 1], {arm}: exit 0, route {lane}, plan {wantPlan}, value {want}"
-                        (c = 0 && routeOk llvm oe && p = wantPlan && got = Some want)
-                        ($"exit {c}; plan {p}; got {got}")
+                for arm in cancelArms do groupAggCancellation ctx dir llvm arm
         finally
             try Directory.Delete(dir, true) with _ -> ()
 
@@ -3238,7 +3378,9 @@ let private cliSmokeNames (ctx: CliSmokeContext) : unit =
           && not (session |> Map.exists (fun k _ -> internalName k)))
          (session |> Map.toList |> List.map fst |> String.concat ", "))
 
-let runCliSmokeTests () : TH.BlockResult =
+/// The CLI smoke block; `resolveTest` is the `blade test` resolver (`resolveTestInvocation`,
+/// defined after the key table, which runs this block).
+let internal runCliSmokeTestsWith (resolveTest: string list -> TestInvocation) () : TH.BlockResult =
     let blockName = "CLI Smoke"
     TH.printHeader "CLI Smoke Test (blade run from a fresh directory)"
     let results = ResizeArray<string * TH.Outcome>()
@@ -3280,7 +3422,7 @@ let runCliSmokeTests () : TH.BlockResult =
                 (-1, o.Result, "timed out")
     let beside (dir: string) =
         Directory.GetFiles dir |> Array.map Path.GetFileName |> Array.sort |> List.ofArray
-    let ctx = { Record = record; RecordCase = recordCase; Spawn = spawn; SpawnWith = spawnWith; Beside = beside; SelfExe = selfExe }
+    let ctx = { Record = record; RecordCase = recordCase; Spawn = spawn; SpawnWith = spawnWith; Beside = beside; SelfExe = selfExe; ResolveTest = resolveTest }
     cliSmokeCompileRun ctx
     cliSmokeSuiteEnvironment ctx
     cliSmokePrintSelection ctx
@@ -3634,6 +3776,629 @@ let private runSurfacingTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+// --- `ide serve` cases as data (K18) ---
+//
+// A case of the ide-serve block that is ONE conversation with `serveLoop` --
+// requests in, checks on the exit code and the responses -- is a `ServeCase`
+// row, run by `runServeCases`; the camera erasure's and the frame filter's
+// single-call cases are `CameraCase` / `FrameCase` rows. A case that compares
+// two results, reads the disk or calls another entry point stays code, in its
+// place in `runIdeServeTests`.
+
+let private ideServeCheckJson (id: int) (tier: string) (file: string) (sourceJson: string) =
+    $"{{\"id\":{id},\"cmd\":\"check\",\"tier\":\"{tier}\",\"file\":\"{(Blade.Ide.jsonEscape file)}\",\"source\":\"{sourceJson}\"}}"
+let private ideServeCheckReq (id: int) (tier: string) (file: string) (source: string) =
+    ideServeCheckJson id tier file (Blade.Ide.jsonEscape source)
+let private ideServePingReq (id: int) = $"{{\"id\":{id},\"cmd\":\"ping\"}}"
+let private ideServeRenderReq (id: int) (session: string) (bindings: string list) (values: float list) =
+    let bs = bindings |> List.map (fun b -> "\"" + b + "\"") |> String.concat ","
+    let vs = values |> List.map (sprintf "%g") |> String.concat ","
+    $"{{\"id\":{id},\"cmd\":\"render\",\"session\":\"{session}\","
+    + $"\"bindings\":[{bs}],\"values\":[{vs}]}}"
+let private ideServeShutdownReq = "{\"cmd\":\"shutdown\"}"
+
+/// Feed a whole conversation and split the transcript on the framing
+/// newline. The trailing "" is the proof that the LAST response was
+/// newline-terminated too; anything else in the tail would be an unframed
+/// write. Returns (exit code, responses, raw transcript).
+let private ideServeDrive (requests: string list) : int * string list * string =
+    let input = new StringReader(String.concat "\n" requests + "\n")
+    let output = new StringWriter()
+    let code = Blade.IdeServe.serveLoop compilerVersion (input :> TextReader) (output :> TextWriter)
+    let raw = output.ToString()
+    let parts = raw.Split('\n') |> Array.toList
+    (code, (parts |> List.filter (fun p -> p <> "")), raw)
+
+// An HM-polymorphic value binding: the typed AST keeps `T` for both lets
+// (the scheme is only instantiated per call site), while monomorphization
+// during lowering resolves them. Exactly the fast/full split.
+let private ideServeHmSource = "function id(x: T) -> T = x\nlet r = id(Int64(42))\nlet s = id(Float64(3.5))\n"
+// Earns a BL4010 pin suggestion plus a `covariance` binding -- the marks
+// whose ABSENCE proves the next request started clean.
+let private ideServeWarnSource =
+    "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
+     function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
+     let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
+     let result = object_for(covariance) <@> (data, data) |> compute\n"
+
+/// One request of a conversation. A check's `file` is a name in the block's
+/// directory (the request names it; nothing writes it).
+type private ServeRequest =
+    | Ping of id: int
+    | Check of id: int * tier: string * file: string * source: string
+    /// A check whose `source` is given as JSON string content, inserted as written.
+    | CheckJson of id: int * tier: string * file: string * sourceJson: string
+    | Render of id: int * session: string * bindings: string list * values: float list
+    | Raw of string
+    | Shutdown
+
+/// One check on a conversation. `Reply*` read response i (0-based) and fail
+/// when there is none; `One*` read the ONE reply of a one-check conversation:
+/// the response when the loop exited 0 with exactly one, else a marker naming
+/// the exit and the responses.
+type private ServeExpect =
+    | ServeExit of int
+    | Replies of int
+    | ReplyHas of int * string
+    | ReplyLacks of int * string
+    /// Response i contains the block directory's own name.
+    | ReplyHasDirName of int
+    | OneHas of string
+    | OneLacks of string
+    /// The ONE reply contains the text exactly this many times.
+    | OneCount of string * int
+
+type private ServeCase =
+    { Name: string
+      Requests: ServeRequest list
+      Expect: ServeExpect list }
+
+/// `needle`'s non-overlapping occurrences in `hay`, ordinal.
+let private ideServeCount (needle: string) (hay: string) =
+    let mutable n = 0
+    let mutable i = hay.IndexOf(needle, StringComparison.Ordinal)
+    while i >= 0 do
+        n <- n + 1
+        i <- hay.IndexOf(needle, i + needle.Length, StringComparison.Ordinal)
+    n
+
+let private ideServeHead (s: string) = if s.Length > 500 then s.Substring(0, 500) else s
+
+/// Run `cases` in order against `serveLoop`, the block's directory `dir`
+/// resolving each check's file, and record one result line per case.
+let private runServeCases (record: string -> TH.Outcome -> string -> unit) (dir: string) (cases: ServeCase list) : unit =
+    let request req =
+        match req with
+        | Ping id -> ideServePingReq id
+        | Check (id, tier, file, source) -> ideServeCheckReq id tier (Path.Combine(dir, file)) source
+        | CheckJson (id, tier, file, sourceJson) -> ideServeCheckJson id tier (Path.Combine(dir, file)) sourceJson
+        | Render (id, session, bindings, values) -> ideServeRenderReq id session bindings values
+        | Raw text -> text
+        | Shutdown -> ideServeShutdownReq
+    for serveCase in cases do
+        let (code, responses, _) = ideServeDrive (serveCase.Requests |> List.map request)
+        let one =
+            match (code, responses) with
+            | (0, [r]) -> r
+            | (code, responses) -> sprintf "<exit %d, responses %A>" code responses
+        let reply i = if i < responses.Length then Some (List.item i responses) else None
+        let holds expect =
+            match expect with
+            | ServeExit n -> code = n
+            | Replies n -> responses.Length = n
+            | ReplyHas (i, s) -> (match reply i with Some r -> r.Contains s | None -> false)
+            | ReplyLacks (i, s) -> (match reply i with Some r -> not (r.Contains s) | None -> false)
+            | ReplyHasDirName i -> (match reply i with Some r -> r.Contains (Path.GetFileName dir) | None -> false)
+            | OneHas s -> one.Contains s
+            | OneLacks s -> not (one.Contains s)
+            | OneCount (s, n) -> ideServeCount s one = n
+        let onlyOne = serveCase.Expect |> List.forall (function OneHas _ | OneLacks _ | OneCount _ -> true | _ -> false)
+        if serveCase.Expect |> List.forall holds then record serveCase.Name TH.Pass ""
+        elif onlyOne then record serveCase.Name TH.Fail (ideServeHead one)
+        else
+            record serveCase.Name TH.Fail
+                ($"exit {code}, responses: [" + String.concat "; " (responses |> List.map ideServeHead) + "]")
+
+// 1. ping: the capability probe the extension uses to choose the serve
+// lane over the one-shot lane.
+let private ideServePingCases : ServeCase list =
+    [ { Name = "ping answers with ok/serve/version and echoes the id"
+        Requests = [ Ping 7; Shutdown ]
+        Expect =
+          [ ServeExit 0; Replies 1; ReplyHas (0, "\"id\":7"); ReplyHas (0, "\"ok\":true")
+            ReplyHas (0, "\"serve\":1"); ReplyHas (0, $"\"version\":\"{compilerVersion}\"") ] } ]
+
+// 6. A store that is not there. The checker refuses at the LOAD SITE
+// (BL2008, line 2 col 13) rather than leaving it for lowering to
+// report spanless; the bindings that did check still arrive (the
+// editor keeps its hovers), the tier stays "full", and the loop
+// survives. Hermetic: the store is missing on purpose, and the
+// message doubles as proof that the loop resolved the provider path
+// against the REQUEST file's directory.
+let private ideServeStoreCases : ServeCase list =
+    [ { Name = "full tier: a missing store is refused at its load site, payload and loop intact"
+        Requests =
+          [ Check (15, "full", "prov.blade", "import csv as csv\nlet store = csv.load(\"no_such_store.csv\")\nlet a: Int64 = 1\n")
+            Ping 16; Shutdown ]
+        Expect =
+          [ ServeExit 0; Replies 2; ReplyHas (0, "\"tier\":\"full\""); ReplyHas (0, "\"code\":\"BL2008\"")
+            ReplyHas (0, "\"line\":2,\"col\":13"); ReplyHas (0, "no_such_store.csv"); ReplyHas (0, "\"name\":\"a\"")
+            ReplyHasDirName 0; ReplyHas (1, "\"id\":16") ] } ]
+
+let private ideServeLoopCases : ServeCase list =
+    // 7. A parse error is data, not an incident: diagnostics come back and
+    // the loop takes the next request.
+    [ { Name = "a parse error yields diagnostics and the loop survives it"
+        Requests = [ Check (13, "fast", "hm.blade", "let ="); Ping 14; Shutdown ]
+        Expect =
+          [ ServeExit 0; Replies 2; ReplyHas (0, "\"id\":13"); ReplyHas (0, "\"severity\":\"error\"")
+            ReplyHas (0, "\"bindings\":[]"); ReplyHas (1, "\"id\":14"); ReplyHas (1, "\"ok\":true") ] }
+      // 8. THE daemon test. `warnSource` leaves a BL4010 suggestion, a
+      // `covariance` binding and a kernel behind; the next request is a
+      // different file and must inherit none of it.
+      { Name = "consecutive checks of different files share no state"
+        Requests =
+          [ Check (21, "fast", "warn.blade", ideServeWarnSource)
+            Check (22, "fast", "clean.blade", "let a: Int64 = 1\n")
+            Shutdown ]
+        Expect =
+          [ ServeExit 0; Replies 2; ReplyHas (0, "BL4010"); ReplyHas (0, "\"name\":\"covariance\"")
+            ReplyHas (1, "\"id\":22"); ReplyHas (1, "\"diagnostics\":[]"); ReplyLacks (1, "BL4010")
+            ReplyLacks (1, "covariance"); ReplyHas (1, "\"kernels\":[]") ] }
+      // 9. Malformed input: an error line, correlated where possible, and a
+      // loop that keeps going.
+      { Name = "malformed and unknown requests answer with errors, never crash"
+        Requests =
+          [ Raw "{not json}"; Raw "{\"id\":31,\"cmd\":\"fly\"}"; Raw "{\"id\":32,\"cmd\":\"check\"}"
+            Ping 33; Shutdown ]
+        Expect =
+          [ ServeExit 0; Replies 4; ReplyHas (0, "\"id\":null"); ReplyHas (0, "\"error\"")
+            ReplyHas (1, "\"id\":31"); ReplyHas (1, "fly"); ReplyHas (2, "\"id\":32"); ReplyHas (2, "\"error\"")
+            ReplyHas (3, "\"id\":33") ] }
+      // 10. Both exits: the verb stops reading immediately, and a closed
+      // stdin is the same clean 0.
+      { Name = "shutdown exits 0 and leaves the trailing request unread"
+        Requests = [ Shutdown; Ping 41 ]
+        Expect = [ ServeExit 0; Replies 0 ] }
+      { Name = "stdin EOF exits 0 after answering everything it read"
+        Requests = [ Ping 42 ]
+        Expect = [ ServeExit 0; Replies 1; ReplyHas (0, "\"id\":42") ] } ]
+
+let private ideServeRenderAndPayloadCases : ServeCase list =
+    // Protocol refusals, and that the loop SURVIVES them: a bad render
+    // request must not take the notebook's language server down with it.
+    [ { Name = "render refuses a bindings/values mismatch and keeps serving"
+        Requests = [ Render (1, "nb", [ "cam_r" ], [ 1.0; 2.0 ]); Ping 2; Shutdown ]
+        Expect =
+          [ ServeExit 0; Replies 2; ReplyHas (0, "\"error\""); ReplyHas (0, "1 bindings and 2 values")
+            ReplyHas (1, "\"ok\":true") ] }
+      { Name = "render on a session that has evaluated nothing says so"
+        Requests = [ Render (1, "ghost", [ "cam_r" ], [ 0.1 ]); Ping 2; Shutdown ]
+        Expect = [ ServeExit 0; Replies 2; ReplyHas (0, "evaluated nothing to render"); ReplyHas (1, "\"ok\":true") ] }
+      // ---- What `blade check` reports, the editor reports ---------------
+      // Each case below is a diagnostic the CLI printed and this payload
+      // dropped, mis-placed, or could not correlate.
+
+      // BL4010 is two things: the pin suggestion (which rides its own
+      // channel as well as the warning log) and the constrained-domain
+      // advisories (which ride the warning log alone). Skipping the code
+      // wholesale to avoid a duplicate dropped the second kind entirely.
+      { Name = "a constrained-domain advisory (BL4010 off the warning log) reaches the payload, at its span"
+        Requests =
+          [ Check (1, "fast", "domain.blade",
+                   "static struct Prod { i: Int32<min=0, max=6>, j: Int32<min=0, max=6> } where (i * j) % 3 == 1\n"
+                   + "let R = method_for(range<Prod>) <@> lambda(i, j) -> i * 10 + j |> compute\n")
+            Shutdown ]
+        Expect = [ OneCount ("\"code\":\"BL4010\"", 1); OneHas "not closed-form"; OneHas "\"line\":2,\"col\":20" ] }
+      { Name = "a pin suggestion is still reported exactly once"
+        Requests = [ Check (1, "fast", "warn.blade", ideServeWarnSource); Shutdown ]
+        Expect = [ OneCount ("\"code\":\"BL4010\"", 1) ] }
+      // A lowering refusal carries a span, and the full tier used to throw
+      // it away: the CLI pointed at the expression, the editor at 1:1.
+      // This is also the file that TYPECHECKS but will not lower: the fast
+      // half of the payload survives intact beside the lowering diagnostic.
+      { Name = "tier=full reports a lowering refusal (BL6002) at ITS span, not 1:1, bindings intact"
+        Requests =
+          [ Check (1, "full", "lower.blade",
+                   "function f(x: Array<Float64 like Idx<5>>) -> Float64 = {\n"
+                   + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
+                   + "    let c = compound(x, m)\n"
+                   + "    reduce(c, (+))\n"
+                   + "}\n"
+                   + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
+                   + "let s = f(a)\n")
+            Shutdown ]
+        Expect =
+          [ OneHas "\"tier\":\"full\""; OneHas "\"code\":\"BL6002\""; OneHas "\"line\":3,\"col\":13"
+            OneHas "\"name\":\"f\""; OneHas "\"name\":\"s\"" ] }
+      // "Void" is not a more concrete spelling of a static tuple's type; it
+      // is what lowering leaves behind once the static evaluator has
+      // consumed the binding.
+      { Name = "tier=full never upgrades a binding's type to Void"
+        Requests = [ Check (1, "full", "statictuple.blade", "let static dims = (2, 3)\nlet n: Int64 = 4\n"); Shutdown ]
+        Expect = [ OneHas "\"name\":\"dims\""; OneLacks "\"concreteType\":\"Void\"" ] }
+      // A store that cannot be read is reported AT THE LOAD, by the tier the
+      // editor runs on every keystroke. It used to be reported nowhere on
+      // the fast tier, and as whatever first needed the store's types on
+      // the full one.
+      { Name = "a store that cannot be read is BL2008 at the load site, on the fast tier"
+        Requests =
+          [ Check (1, "fast", "nostore.blade",
+                   "import zarr as z\nlet s = z.load(\"definitely_absent_store\")\nlet n: Int64 = 1\n")
+            Shutdown ]
+        Expect = [ OneHas "\"code\":\"BL2008\""; OneHas "\"line\":2,\"col\":9"; OneHas "not a Zarr store" ] }
+      // `"\ud83d"` is valid JSON and invalid UTF-16 (what a JavaScript
+      // client writes for a buffer cut mid-emoji). The check must be
+      // ANSWERED, under its own id: an id-less error cannot be correlated,
+      // and the client's request then sits until its timeout kills the
+      // process and every session with it.
+      { Name = "a lone surrogate in `source` is checked and answered under the request's id"
+        Requests = [ CheckJson (41, "fast", "sur.blade", "let s = \\\"\\ud83d\\\"\\nlet t = 1\\n"); Ping 42; Shutdown ]
+        Expect =
+          [ ServeExit 0; Replies 2; ReplyHas (0, "\"id\":41"); ReplyHas (0, "\"name\":\"t\"")
+            ReplyLacks (0, "\"error\""); ReplyHas (1, "\"id\":42") ] } ]
+
+/// One check on `cameraErasedSource`'s result. `Erased*` need an erased source
+/// (Ok), `RefusedHas` a refusal (Error).
+type private CameraExpect =
+    | ErasedHas of string
+    | ErasedStarts of string
+    /// The first occurrence of the first text precedes that of the second.
+    | ErasedBefore of string * string
+    | RefusedHas of string
+
+type private CameraCase =
+    { Name: string
+      Source: string
+      Names: string list
+      Csv: string
+      Expect: CameraExpect list }
+
+let private runCameraCases (record: string -> TH.Outcome -> string -> unit) (cases: CameraCase list) : unit =
+    for cameraCase in cases do
+        let result = Blade.IdeServe.cameraErasedSource cameraCase.Source cameraCase.Names cameraCase.Csv
+        let holds expect =
+            match expect, result with
+            | ErasedHas s, Ok out -> out.Contains s
+            | ErasedStarts s, Ok out -> out.StartsWith s
+            | ErasedBefore (a, b), Ok out -> out.IndexOf a < out.IndexOf b
+            | RefusedHas s, Error e -> e.Contains s
+            | _ -> false
+        if cameraCase.Expect |> List.forall holds then record cameraCase.Name TH.Pass ""
+        else
+            record cameraCase.Name TH.Fail
+                (match result with Ok out -> "Ok " + out | Error e -> "Error " + e)
+
+// THE RENDER FAST PATH. The camera stays in the CELL -- the notebook
+// keeps saying where the lens points -- and what the lane COMPILES is
+// that program with the camera erased into a run-time CSV read. The
+// erased source is the same bytes for every camera, which is the whole
+// mechanism: build once, re-run per gesture.
+//
+// Pinned on the erasure rather than end to end, because e2e costs a
+// g++ build and the risk lives here: a slot mapped to the wrong
+// binding renders a plausible picture of the wrong place.
+let private ideServeCamSrc =
+    "import plot\n\nlet a: Int64 = 1\n\nlet cam_cx: Float64 = -0.5\n"
+    + "let cam_cy: Float64 = 0.25\nlet cam_r: Float64 = 0.004\nlet cam_px: Int64 = 256\n"
+    + "\nlet z = cam_cx + cam_r\n"
+
+let private ideServeCameraCases : CameraCase list =
+    [ { Name = "the camera erasure rewrites each binding to its own CSV slot"
+        Source = ideServeCamSrc
+        Names = [ "cam_cx"; "cam_cy"; "cam_r" ]
+        Csv = @"C:\tmp\camera.csv"
+        Expect =
+          [ ErasedStarts "import csv as __blade_cam_csv"
+            ErasedHas "let cam_cx: Float64 = __blade_cam_slots(0, 0)"
+            ErasedHas "let cam_cy: Float64 = __blade_cam_slots(0, 1)"
+            ErasedHas "let cam_r: Float64 = __blade_cam_slots(0, 2)"
+            // Not named, so not erased: the resolution stays literal.
+            ErasedHas "let cam_px: Int64 = 256"
+            // Forward slashes -- a Windows separator inside a Blade
+            // string literal would read as an escape.
+            ErasedHas "__blade_cam_csv.load(\"C:/tmp/camera.csv\")"
+            // The reader precedes the EARLIEST camera binding, and so
+            // precedes every use of the camera.
+            ErasedBefore ("__blade_cam_slots = ", "let cam_cx: Float64 =") ] }
+      { Name = "the camera erasure preserves bounded annotations and trailing comments"
+        Source = "let cam_r: Float64<min=0.0, max=1.0> = 0.1 // keep\r\n"
+        Names = [ "cam_r" ]
+        Csv = "c.csv"
+        Expect = [ ErasedHas "let cam_r: Float64<min=0.0, max=1.0> = __blade_cam_slots(0, 0) // keep\r\n" ] }
+      { Name = "the camera erasure accepts an unannotated binding without counting a local shadow"
+        Source = "function f() = { let cam_r = 0.2; cam_r }\nlet cam_r = 0.1\n"
+        Names = [ "cam_r" ]
+        Csv = "c.csv"
+        Expect = [ ErasedHas "let cam_r = __blade_cam_slots(0, 0)"; ErasedHas "function f() = { let cam_r = 0.2; cam_r }" ] } ]
+
+// ...and the refusals, which are the safety property. A camera name the
+// erasure cannot pin down exactly once would leave a literal standing
+// and render from a camera the caller never set -- silently, and to a
+// picture that looks entirely reasonable.
+let private ideServeCameraRefusalCases : CameraCase list =
+    [ { Name = "the camera erasure refuses a name bound more than once"
+        Source = "let cam_r: Float64 = 0.1\n\nlet cam_r = 0.2\n"
+        Names = [ "cam_r" ]
+        Csv = "c.csv"
+        Expect = [ RefusedHas "cam_r"; RefusedHas "2 times" ] }
+      { Name = "the camera erasure refuses a name that is not bound at all"
+        Source = "let q: Int64 = 1\n"
+        Names = [ "cam_r" ]
+        Csv = "c.csv"
+        Expect = [ RefusedHas "cam_r"; RefusedHas "0 times" ] }
+      { Name = "the camera erasure refuses repeated requested binding names"
+        Source = "let cam_r: Float64 = 0.1\n"
+        Names = [ "cam_r"; "cam_r" ]
+        Csv = "c.csv"
+        Expect = [ RefusedHas "requested more than once" ] }
+      { Name = "the camera reader preserves an indented declaration's whitespace"
+        Source = "  let cam_r: Float64 = 0.1\r\n"
+        Names = [ "cam_r" ]
+        Csv = "c.csv"
+        Expect = [ ErasedHas "read\n  let cam_r: Float64 = __blade_cam_slots(0, 0)\r\n" ] } ]
+
+/// One case of `changedFrameIndices`: the previous run's digests, this run's,
+/// and the indices it must send.
+type private FrameCase =
+    { Name: string
+      Previous: string[]
+      Digests: string[]
+      Send: int[] }
+
+let private runFrameCases (record: string -> TH.Outcome -> string -> unit) (cases: FrameCase list) : unit =
+    for frameCase in cases do
+        let sent = Blade.IdeServe.changedFrameIndices frameCase.Previous frameCase.Digests
+        if sent = frameCase.Send then record frameCase.Name TH.Pass ""
+        else record frameCase.Name TH.Fail ("[" + (sent |> Array.map string |> String.concat "; ") + "]")
+
+let private ideServeFrameCases : FrameCase list =
+    // A render re-runs the WHOLE program, so it re-emits every plot the
+    // notebook has -- but a camera change can only alter the plots that read
+    // the camera. Sending the rest replays the notebook into the panel: a
+    // fixed tour under a stable id animates its entire descent again on
+    // every zoom and lands back where it started, which is exactly how this
+    // was reported.
+    [ { Name = "an unchanged frame is not re-sent"
+        Previous = [| "a"; "b"; "c" |]
+        Digests = [| "a"; "b"; "c" |]
+        Send = [||] }
+      // ...and the direction that must never be wrong. Holding back a frame
+      // that DID move leaves a stale picture on screen, so a differing digest
+      // and anything past the end of the previous run both count as changed.
+      { Name = "a moved frame is sent, and only that one"
+        Previous = [| "a"; "b"; "c" |]
+        Digests = [| "a"; "B"; "c" |]
+        Send = [| 1 |] }
+      { Name = "frames past the previous run's end are always sent"
+        Previous = [| "a" |]
+        Digests = [| "a"; "b"; "c" |]
+        Send = [| 1; 2 |] }
+      // The first render of a session has nothing to compare against, and the
+      // panel has not seen this executable's output: send all of it.
+      { Name = "the first render sends every frame"
+        Previous = [||]
+        Digests = [| "a"; "b" |]
+        Send = [| 0; 1 |] } ]
+
+/// Cases 2-5: the fast and full tiers on one buffer, and the framing of the
+/// fast tier's response.
+let private ideServeTierCases (record: string -> TH.Outcome -> string -> unit) (tmpDir: string) : unit =
+    let hmPath = Path.Combine(tmpDir, "hm.blade")
+    // 2. Fast tier: today's payload, on the BUFFER. `hmPath` is never
+    // written to disk, so bindings can only have come from `source`.
+    let (code, responses, raw) = ideServeDrive [ideServeCheckReq 11 "fast" hmPath ideServeHmSource; ideServeShutdownReq]
+    let fastBody = match responses with [r] -> r | _ -> ""
+    let name = "check tier=fast: id/tier echoed, bindings from the unsaved buffer"
+    if code = 0 && not (File.Exists hmPath)
+       && fastBody.Contains "\"id\":11" && fastBody.Contains "\"tier\":\"fast\""
+       && fastBody.Contains "\"diagnostics\":[]" && fastBody.Contains "\"name\":\"r\""
+       && not (fastBody.Contains "concreteType") then
+        record name TH.Pass ""
+    else
+        record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+    // 3. Framing: one \n-terminated line per response, and the payload's
+    // own multi-line function signatures escaped INTO it, not through it.
+    let name = "each response is exactly one newline-terminated line"
+    if raw.EndsWith "\n" && raw.Split('\n').Length = 2 && fastBody.Contains "\\n" then
+        record name TH.Pass ""
+    else
+        record name TH.Fail $"{raw.Split('\n').Length} newline-separated parts"
+
+    // 4. Full tier: monomorphization adds `concreteType` only where it
+    // actually knows more than the typed AST did. For an HM call it no
+    // longer does: the call judgment instantiates the callee's signature
+    // per call (docs/plans/plan-call-judgment.md), so the typed AST
+    // already says `r: Int64` / `s: Float64` -- these used to read `T`,
+    // the CALLEE's type variable leaking into the caller's binding, and
+    // were upgraded here.
+    let (code, responses, _) = ideServeDrive [ideServeCheckReq 12 "full" hmPath ideServeHmSource; ideServeShutdownReq]
+    let fullBody = match responses with [r] -> r | _ -> ""
+    let name = "check tier=full: HM value bindings are already concrete"
+    if code = 0 && fullBody.Contains "\"tier\":\"full\""
+       && fullBody.Contains "\"name\":\"r\",\"kind\":\"let\",\"line\":2,\"col\":1,\"type\":\"Int64\""
+       && fullBody.Contains "\"name\":\"s\",\"kind\":\"let\",\"line\":3,\"col\":1,\"type\":\"Float64\"" then
+        record name TH.Pass ""
+    else
+        record name TH.Fail $"exit {code}, response: {fullBody}"
+
+    // 5. `concreteType` is emitted only as a genuinely different spelling:
+    // a binding the typed AST already typed concretely gets none.
+    let name = "full tier adds no concreteType where the type is already concrete"
+    if not (fullBody.Contains "\"concreteType\"") then
+        record name TH.Pass ""
+    else
+        record name TH.Fail $"response: {fullBody}"
+
+/// 6b. Provider-read provenance, one binding per verb shape: `read`
+/// and `stream` take the store view directly, `load_compound` takes
+/// it first of two, and a `write` chases the named binding it
+/// persists back to THAT binding's provenance. Hermetic: a real 2x2
+/// int csv on disk, so the load typechecks and the fast tier keeps
+/// its bindings; nothing here lowers, so csv's codegen-time
+/// stream/load_compound refusals never fire.
+let private ideServeProviderPayload (record: string -> TH.Outcome -> string -> unit) (tmpDir: string) : unit =
+    Blade.ProviderStatics.install ()
+    let provStoreCsv = Path.Combine(tmpDir, "prov_store.csv")
+    File.WriteAllText(provStoreCsv, "1,2\n3,4\n")
+    let provReadSource =
+        "import csv as c\n"
+        + sprintf "let store = c.load(\"%s\")\n" (provStoreCsv.Replace('\\', '/'))
+        + "let obs = store.vars.data |> c.read\n"
+        + "let strm = c.stream(store.vars.data)\n"
+        + "let cmp = c.load_compound(store.vars.data, store.vars.data)\n"
+        + sprintf "let saved = c.write(\"%s\", obs)\n"
+                  ((Path.Combine(tmpDir, "prov_out.csv")).Replace('\\', '/'))
+    let (provJson, provReadCode) =
+        Blade.Ide.ideCheckSource (Path.Combine(tmpDir, "provread.blade")) provReadSource
+    // The literal `"<field>":{...}` object inside `bname`'s binding
+    // (bounded by the next `"name":` key), or a marker when absent.
+    let fieldOf (field: string) (bname: string) =
+        let key = sprintf "\"name\":\"%s\"" bname
+        let start = provJson.IndexOf key
+        if start < 0 then "no-binding" else
+        let next = provJson.IndexOf("\"name\":\"", start + key.Length)
+        let seg = if next < 0 then provJson.Substring start else provJson.Substring(start, next - start)
+        let pk = sprintf "\"%s\":" field
+        let ps = seg.IndexOf pk
+        if ps < 0 then "none" else
+        let pe = seg.IndexOf('}', ps)
+        seg.Substring(ps + pk.Length, pe - ps - pk.Length + 1)
+    let provOf = fieldOf "providerRead"
+    let writeOf = fieldOf "providerWrite"
+    let expectedProv = "{\"store\":\"store\",\"member\":\"vars.data\"}"
+    let name = "check payload: providerRead covers read/stream/load_compound"
+    if provReadCode = 0 && provOf "obs" = expectedProv && provOf "strm" = expectedProv
+       && provOf "cmp" = expectedProv then
+        record name TH.Pass ""
+    else
+        record name TH.Fail
+               (sprintf "exit %d, obs=%s strm=%s cmp=%s" provReadCode
+                        (provOf "obs") (provOf "strm") (provOf "cmp"))
+    // A write faces the OPPOSITE direction: `saved` PERSISTS `obs`, so it
+    // names where that array came from under `providerWrite` and carries
+    // no `providerRead` at all.
+    let name = "check payload: a write binding carries providerWrite, never providerRead"
+    if provReadCode = 0 && writeOf "saved" = expectedProv && provOf "saved" = "none" then
+        record name TH.Pass ""
+    else
+        record name TH.Fail
+               (sprintf "exit %d, saved providerWrite=%s providerRead=%s" provReadCode
+                        (writeOf "saved") (provOf "saved"))
+    let name = "check payload: providers[] describes the loaded csv store"
+    if provJson.Contains "\"store\":\"store\",\"alias\":\"c\",\"provider\":\"csv\"" then
+        record name TH.Pass ""
+    else
+        record name TH.Fail (provJson.Substring(0, min 400 provJson.Length))
+
+/// Cases 11-12: the one-shot lane `ide check --json`.
+let private ideServeOneShotLane (record: string -> TH.Outcome -> string -> unit) (tmpDir: string) : unit =
+    let hmPath = Path.Combine(tmpDir, "hm.blade")
+    // 11. The refactor's own invariant: `ide check --json` still prints
+    // exactly what `ideCheckSource` returns, so the extension's one-shot
+    // fallback lane is unaffected by the serve work.
+    File.WriteAllText(hmPath, ideServeHmSource)
+    let (json, srcCode) = Blade.Ide.ideCheckSource hmPath ideServeHmSource
+    let (swOut, oldOut) = (new StringWriter(), Console.Out)
+    let cliCode = try Console.SetOut swOut; Blade.Ide.ideCheck hmPath finally Console.SetOut oldOut
+    let name = "ide check --json still prints ideCheckSource's payload verbatim"
+    if srcCode = cliCode && swOut.ToString().TrimEnd('\r', '\n') = json then
+        record name TH.Pass ""
+    else
+        record name TH.Fail $"exit {srcCode} vs {cliCode}"
+
+    // 12. ...including the missing-file arm, which lives only in the
+    // printing wrapper now.
+    let (code, out, _) =
+        let (swOut, swErr) = (new StringWriter(), new StringWriter())
+        let (oldOut, oldErr) = (Console.Out, Console.Error)
+        try
+            Console.SetOut swOut
+            Console.SetError swErr
+            let r = Blade.Ide.ideCheck (Path.Combine(tmpDir, "nope.blade"))
+            (r, swOut.ToString(), swErr.ToString())
+        finally
+            Console.SetOut oldOut
+            Console.SetError oldErr
+    let name = "ide check --json on a missing file still emits JSON and exit 1"
+    if code = 1 && out.Contains "File not found" && out.Contains "\"bindings\":[]" then
+        record name TH.Pass ""
+    else
+        record name TH.Fail $"exit {code}, json: {out.Trim()}"
+
+/// The camera erasure's two-result cases: the same erasure for every camera
+/// value, and the refusal of every unsupported target.
+let private ideServeCameraRelations (record: string -> TH.Outcome -> string -> unit) : unit =
+    let name = "the camera erasure is unchanged when only typed camera values move"
+    let moved = ideServeCamSrc.Replace("-0.5", "0.750000001").Replace("0.25", "-1.0").Replace("0.004", "0.000000000001")
+    match Blade.IdeServe.cameraErasedSource ideServeCamSrc ["cam_cx"; "cam_cy"; "cam_r"] "c.csv",
+          Blade.IdeServe.cameraErasedSource moved ["cam_cx"; "cam_cy"; "cam_r"] "c.csv" with
+    | Ok before, Ok after when before = after -> record name TH.Pass ""
+    | other -> record name TH.Fail (sprintf "%A" other)
+
+    let name = "the camera erasure refuses static and destructured targets"
+    let invalidTargets = [ "let static cam_r = 0.1\n"; "let (cam_r, other) = (0.1, 0.2)\n" ]
+    let refused =
+        invalidTargets |> List.forall (fun src ->
+            match Blade.IdeServe.cameraErasedSource src ["cam_r"] "c.csv" with
+            | Error e -> e.Contains "simple runtime let"
+            | _ -> false)
+    if refused then record name TH.Pass "" else record name TH.Fail "an unsupported target was not refused"
+
+/// The camera crosses as text, so it has to cross EXACTLY: a lens moved
+/// by one ulp at a 1e-13 half-span is a different picture.
+let private ideServeCameraCsv (record: string -> TH.Outcome -> string -> unit) : unit =
+    let name = "a camera row round-trips its Float64s exactly"
+    let camVals = [ -0.743643887037151; 0.131825904205330; 0.004 ]
+    let camBack =
+        (Blade.IdeServe.cameraCsvText camVals).Trim().Split(',')
+        |> Array.map float |> List.ofArray
+    if camBack = camVals then record name TH.Pass ""
+    else record name TH.Fail (sprintf "%A" camBack)
+
+/// ---- Session directories of dead processes -------------------------
+/// A killed daemon cannot remove its sessions' temp directories; the
+/// next one to start does. Driven against a private root with a fake
+/// liveness oracle: nothing here kills a process or waits a day.
+let private ideServeSessionSweep (record: string -> TH.Outcome -> string -> unit) (tmpDir: string) (entryDir: string) : unit =
+    let sweepRoot = Path.Combine(tmpDir, "sweep")
+    let mkSession (suffix: string) (owner: int option) (ageHours: float) =
+        let dir = Path.Combine(sweepRoot, Blade.ReplSession.sessionDirPrefix + suffix)
+        Directory.CreateDirectory dir |> ignore
+        File.WriteAllText(Path.Combine(dir, "session.blade"), "let x: Int64 = 1\n")
+        (match owner with
+         | Some pid -> File.WriteAllText(Path.Combine(dir, Blade.ReplSession.ownerMarkerName), string pid)
+         | None -> ())
+        Directory.SetLastWriteTimeUtc(dir, DateTime.UtcNow.AddHours(-ageHours))
+        dir
+    let liveOwned = mkSession "live0001" (Some 111) 48.0
+    let deadOwned = mkSession "dead0001" (Some 222) 0.0
+    let oldUnmarked = mkSession "old00001" None 48.0
+    let newUnmarked = mkSession "new00001" None 1.0
+    let unrelated = Path.Combine(sweepRoot, "not-a-session")
+    Directory.CreateDirectory unrelated |> ignore
+    let removed =
+        Blade.ReplSession.sweepStaleSessionDirs sweepRoot (fun pid -> pid = 111) DateTime.UtcNow
+    let name = "the session sweep removes a dead owner's directory and an old unmarked one, nothing else"
+    if removed = 2
+       && Directory.Exists liveOwned && not (Directory.Exists deadOwned)
+       && not (Directory.Exists oldUnmarked) && Directory.Exists newUnmarked
+       && Directory.Exists unrelated then record name TH.Pass ""
+    else
+        record name TH.Fail
+            (sprintf "removed %d; live %b dead %b old %b new %b other %b" removed
+                (Directory.Exists liveOwned) (Directory.Exists deadOwned)
+                (Directory.Exists oldUnmarked) (Directory.Exists newUnmarked) (Directory.Exists unrelated))
+    let name = "a new session directory names this process as its owner"
+    let probe = Blade.ReplSession.ReplSession(entryDir)
+    (try
+        let marker = Path.Combine(probe.SessionDir, Blade.ReplSession.ownerMarkerName)
+        if File.Exists marker && (File.ReadAllText marker).Trim() = string Environment.ProcessId then
+            record name TH.Pass ""
+        else record name TH.Fail $"no owner marker under {probe.SessionDir}"
+     finally probe.Cleanup())
+
 /// `blade ide serve`, driven IN-PROCESS through `serveLoop`'s TextReader /
 /// TextWriter seam -- no spawn, no g++, no editor. What is under test is the
 /// PROTOCOL (framing, id/tier echo, error containment) and the daemon's
@@ -3646,38 +4411,6 @@ let private runIdeServeTests () : TH.BlockResult =
     let record name outcome detail =
         TH.resultLine outcome name detail
         results.Add((name, outcome))
-    let esc = Blade.Ide.jsonEscape
-    let checkReq (id: int) (tier: string) (file: string) (source: string) =
-        $"{{\"id\":{id},\"cmd\":\"check\",\"tier\":\"{tier}\",\"file\":\"{(esc file)}\",\"source\":\"{(esc source)}\"}}"
-    let pingReq (id: int) = $"{{\"id\":{id},\"cmd\":\"ping\"}}"
-    let renderReq (id: int) (session: string) (bindings: string list) (values: float list) =
-        let bs = bindings |> List.map (fun b -> "\"" + b + "\"") |> String.concat ","
-        let vs = values |> List.map (sprintf "%g") |> String.concat ","
-        $"{{\"id\":{id},\"cmd\":\"render\",\"session\":\"{session}\","
-        + $"\"bindings\":[{bs}],\"values\":[{vs}]}}"
-    let shutdownReq = "{\"cmd\":\"shutdown\"}"
-    /// Feed a whole conversation and split the transcript on the framing
-    /// newline. The trailing "" is the proof that the LAST response was
-    /// newline-terminated too; anything else in the tail would be an unframed
-    /// write. Returns (exit code, responses, raw transcript).
-    let drive (requests: string list) : int * string list * string =
-        let input = new StringReader(String.concat "\n" requests + "\n")
-        let output = new StringWriter()
-        let code = Blade.IdeServe.serveLoop compilerVersion (input :> TextReader) (output :> TextWriter)
-        let raw = output.ToString()
-        let parts = raw.Split('\n') |> Array.toList
-        (code, (parts |> List.filter (fun p -> p <> "")), raw)
-    // An HM-polymorphic value binding: the typed AST keeps `T` for both lets
-    // (the scheme is only instantiated per call site), while monomorphization
-    // during lowering resolves them. Exactly the fast/full split.
-    let hmSource = "function id(x: T) -> T = x\nlet r = id(Int64(42))\nlet s = id(Float64(3.5))\n"
-    // Earns a BL4010 pin suggestion plus a `covariance` binding -- the marks
-    // whose ABSENCE proves the next request started clean.
-    let warnSource =
-        "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
-         function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
-         let data = Float64([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])\n\
-         let result = object_for(covariance) <@> (data, data) |> compute\n"
     let tmpDir = Path.Combine(Path.GetTempPath(), "blade_ideserve_" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory(tmpDir) |> ignore
     // serveLoop chdirs per request (provider relative paths) and restores on
@@ -3685,520 +4418,20 @@ let private runIdeServeTests () : TH.BlockResult =
     // contaminate every later block in the suite.
     let entryDir = Directory.GetCurrentDirectory()
     try
-        let hmPath = Path.Combine(tmpDir, "hm.blade")
-        let warnPath = Path.Combine(tmpDir, "warn.blade")
-        let cleanPath = Path.Combine(tmpDir, "clean.blade")
-
-        // 1. ping: the capability probe the extension uses to choose the serve
-        // lane over the one-shot lane.
-        let (code, responses, _) = drive [pingReq 7; shutdownReq]
-        let name = "ping answers with ok/serve/version and echoes the id"
-        match responses with
-        | [r] when code = 0 && r.Contains "\"id\":7" && r.Contains "\"ok\":true"
-                   && r.Contains "\"serve\":1" && r.Contains $"\"version\":\"{compilerVersion}\"" ->
-            record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        // 2. Fast tier: today's payload, on the BUFFER. `hmPath` is never
-        // written to disk, so bindings can only have come from `source`.
-        let (code, responses, raw) = drive [checkReq 11 "fast" hmPath hmSource; shutdownReq]
-        let fastBody = match responses with [r] -> r | _ -> ""
-        let name = "check tier=fast: id/tier echoed, bindings from the unsaved buffer"
-        if code = 0 && not (File.Exists hmPath)
-           && fastBody.Contains "\"id\":11" && fastBody.Contains "\"tier\":\"fast\""
-           && fastBody.Contains "\"diagnostics\":[]" && fastBody.Contains "\"name\":\"r\""
-           && not (fastBody.Contains "concreteType") then
-            record name TH.Pass ""
-        else
-            record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        // 3. Framing: one \n-terminated line per response, and the payload's
-        // own multi-line function signatures escaped INTO it, not through it.
-        let name = "each response is exactly one newline-terminated line"
-        if raw.EndsWith "\n" && raw.Split('\n').Length = 2 && fastBody.Contains "\\n" then
-            record name TH.Pass ""
-        else
-            record name TH.Fail $"{raw.Split('\n').Length} newline-separated parts"
-
-        // 4. Full tier: monomorphization adds `concreteType` only where it
-        // actually knows more than the typed AST did. For an HM call it no
-        // longer does: the call judgment instantiates the callee's signature
-        // per call (docs/plans/plan-call-judgment.md), so the typed AST
-        // already says `r: Int64` / `s: Float64` -- these used to read `T`,
-        // the CALLEE's type variable leaking into the caller's binding, and
-        // were upgraded here.
-        let (code, responses, _) = drive [checkReq 12 "full" hmPath hmSource; shutdownReq]
-        let fullBody = match responses with [r] -> r | _ -> ""
-        let name = "check tier=full: HM value bindings are already concrete"
-        if code = 0 && fullBody.Contains "\"tier\":\"full\""
-           && fullBody.Contains "\"name\":\"r\",\"kind\":\"let\",\"line\":2,\"col\":1,\"type\":\"Int64\""
-           && fullBody.Contains "\"name\":\"s\",\"kind\":\"let\",\"line\":3,\"col\":1,\"type\":\"Float64\"" then
-            record name TH.Pass ""
-        else
-            record name TH.Fail $"exit {code}, response: {fullBody}"
-
-        // 5. `concreteType` is emitted only as a genuinely different spelling:
-        // a binding the typed AST already typed concretely gets none.
-        let name = "full tier adds no concreteType where the type is already concrete"
-        if not (fullBody.Contains "\"concreteType\"") then
-            record name TH.Pass ""
-        else
-            record name TH.Fail $"response: {fullBody}"
-
-        // 6. A store that is not there. The checker refuses at the LOAD SITE
-        // (BL2008, line 2 col 13) rather than leaving it for lowering to
-        // report spanless; the bindings that did check still arrive (the
-        // editor keeps its hovers), the tier stays "full", and the loop
-        // survives. Hermetic: the store is missing on purpose, and the
-        // message doubles as proof that the loop resolved the provider path
-        // against the REQUEST file's directory.
-        let provPath = Path.Combine(tmpDir, "prov.blade")
-        let provSource =
-            "import csv as csv\nlet store = csv.load(\"no_such_store.csv\")\nlet a: Int64 = 1\n"
-        let (code, responses, _) =
-            drive [ checkReq 15 "full" provPath provSource; pingReq 16; shutdownReq ]
-        let name = "full tier: a missing store is refused at its load site, payload and loop intact"
-        match responses with
-        | [broken; pong] when code = 0 && broken.Contains "\"tier\":\"full\""
-                              && broken.Contains "\"code\":\"BL2008\""
-                              && broken.Contains "\"line\":2,\"col\":13"
-                              && broken.Contains "no_such_store.csv"
-                              && broken.Contains "\"name\":\"a\""
-                              && broken.Contains (Path.GetFileName tmpDir)
-                              && pong.Contains "\"id\":16" ->
-            record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        // 6b. Provider-read provenance, one binding per verb shape: `read`
-        // and `stream` take the store view directly, `load_compound` takes
-        // it first of two, and a `write` chases the named binding it
-        // persists back to THAT binding's provenance. Hermetic: a real 2x2
-        // int csv on disk, so the load typechecks and the fast tier keeps
-        // its bindings; nothing here lowers, so csv's codegen-time
-        // stream/load_compound refusals never fire.
-        Blade.ProviderStatics.install ()
-        let provStoreCsv = Path.Combine(tmpDir, "prov_store.csv")
-        File.WriteAllText(provStoreCsv, "1,2\n3,4\n")
-        let provReadSource =
-            "import csv as c\n"
-            + sprintf "let store = c.load(\"%s\")\n" (provStoreCsv.Replace('\\', '/'))
-            + "let obs = store.vars.data |> c.read\n"
-            + "let strm = c.stream(store.vars.data)\n"
-            + "let cmp = c.load_compound(store.vars.data, store.vars.data)\n"
-            + sprintf "let saved = c.write(\"%s\", obs)\n"
-                      ((Path.Combine(tmpDir, "prov_out.csv")).Replace('\\', '/'))
-        let (provJson, provReadCode) =
-            Blade.Ide.ideCheckSource (Path.Combine(tmpDir, "provread.blade")) provReadSource
-        // The literal `"<field>":{...}` object inside `bname`'s binding
-        // (bounded by the next `"name":` key), or a marker when absent.
-        let fieldOf (field: string) (bname: string) =
-            let key = sprintf "\"name\":\"%s\"" bname
-            let start = provJson.IndexOf key
-            if start < 0 then "no-binding" else
-            let next = provJson.IndexOf("\"name\":\"", start + key.Length)
-            let seg = if next < 0 then provJson.Substring start else provJson.Substring(start, next - start)
-            let pk = sprintf "\"%s\":" field
-            let ps = seg.IndexOf pk
-            if ps < 0 then "none" else
-            let pe = seg.IndexOf('}', ps)
-            seg.Substring(ps + pk.Length, pe - ps - pk.Length + 1)
-        let provOf = fieldOf "providerRead"
-        let writeOf = fieldOf "providerWrite"
-        let expectedProv = "{\"store\":\"store\",\"member\":\"vars.data\"}"
-        let name = "check payload: providerRead covers read/stream/load_compound"
-        if provReadCode = 0 && provOf "obs" = expectedProv && provOf "strm" = expectedProv
-           && provOf "cmp" = expectedProv then
-            record name TH.Pass ""
-        else
-            record name TH.Fail
-                   (sprintf "exit %d, obs=%s strm=%s cmp=%s" provReadCode
-                            (provOf "obs") (provOf "strm") (provOf "cmp"))
-        // A write faces the OPPOSITE direction: `saved` PERSISTS `obs`, so it
-        // names where that array came from under `providerWrite` and carries
-        // no `providerRead` at all.
-        let name = "check payload: a write binding carries providerWrite, never providerRead"
-        if provReadCode = 0 && writeOf "saved" = expectedProv && provOf "saved" = "none" then
-            record name TH.Pass ""
-        else
-            record name TH.Fail
-                   (sprintf "exit %d, saved providerWrite=%s providerRead=%s" provReadCode
-                            (writeOf "saved") (provOf "saved"))
-        let name = "check payload: providers[] describes the loaded csv store"
-        if provJson.Contains "\"store\":\"store\",\"alias\":\"c\",\"provider\":\"csv\"" then
-            record name TH.Pass ""
-        else
-            record name TH.Fail (provJson.Substring(0, min 400 provJson.Length))
-
-        // 7. A parse error is data, not an incident: diagnostics come back and
-        // the loop takes the next request.
-        let (code, responses, _) = drive [checkReq 13 "fast" hmPath "let ="; pingReq 14; shutdownReq]
-        let name = "a parse error yields diagnostics and the loop survives it"
-        match responses with
-        | [bad; pong] when code = 0 && bad.Contains "\"id\":13"
-                           && bad.Contains "\"severity\":\"error\"" && bad.Contains "\"bindings\":[]"
-                           && pong.Contains "\"id\":14" && pong.Contains "\"ok\":true" ->
-            record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        // 8. THE daemon test. `warnSource` leaves a BL4010 suggestion, a
-        // `covariance` binding and a kernel behind; the next request is a
-        // different file and must inherit none of it.
-        let (code, responses, _) =
-            drive [ checkReq 21 "fast" warnPath warnSource
-                    checkReq 22 "fast" cleanPath "let a: Int64 = 1\n"
-                    shutdownReq ]
-        let name = "consecutive checks of different files share no state"
-        match responses with
-        | [first; second] when code = 0
-                               && first.Contains "BL4010" && first.Contains "\"name\":\"covariance\""
-                               && second.Contains "\"id\":22" && second.Contains "\"diagnostics\":[]"
-                               && not (second.Contains "BL4010")
-                               && not (second.Contains "covariance")
-                               && second.Contains "\"kernels\":[]" ->
-            record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        // 9. Malformed input: an error line, correlated where possible, and a
-        // loop that keeps going.
-        let (code, responses, _) =
-            drive [ "{not json}"; "{\"id\":31,\"cmd\":\"fly\"}"; "{\"id\":32,\"cmd\":\"check\"}"
-                    pingReq 33; shutdownReq ]
-        let name = "malformed and unknown requests answer with errors, never crash"
-        match responses with
-        | [junk; unknown; incomplete; pong] when code = 0
-                                                 && junk.Contains "\"id\":null" && junk.Contains "\"error\""
-                                                 && unknown.Contains "\"id\":31" && unknown.Contains "fly"
-                                                 && incomplete.Contains "\"id\":32" && incomplete.Contains "\"error\""
-                                                 && pong.Contains "\"id\":33" ->
-            record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        // 10. Both exits: the verb stops reading immediately, and a closed
-        // stdin is the same clean 0.
-        let (code, responses, _) = drive [shutdownReq; pingReq 41]
-        let name = "shutdown exits 0 and leaves the trailing request unread"
-        if code = 0 && responses.IsEmpty then record name TH.Pass ""
-        else record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        let (code, responses, _) = drive [pingReq 42]
-        let name = "stdin EOF exits 0 after answering everything it read"
-        match responses with
-        | [r] when code = 0 && r.Contains "\"id\":42" -> record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        // 11. The refactor's own invariant: `ide check --json` still prints
-        // exactly what `ideCheckSource` returns, so the extension's one-shot
-        // fallback lane is unaffected by the serve work.
-        File.WriteAllText(hmPath, hmSource)
-        let (json, srcCode) = Blade.Ide.ideCheckSource hmPath hmSource
-        let (swOut, oldOut) = (new StringWriter(), Console.Out)
-        let cliCode = try Console.SetOut swOut; Blade.Ide.ideCheck hmPath finally Console.SetOut oldOut
-        let name = "ide check --json still prints ideCheckSource's payload verbatim"
-        if srcCode = cliCode && swOut.ToString().TrimEnd('\r', '\n') = json then
-            record name TH.Pass ""
-        else
-            record name TH.Fail $"exit {srcCode} vs {cliCode}"
-
-        // 12. ...including the missing-file arm, which lives only in the
-        // printing wrapper now.
-        let (code, out, _) =
-            let (swOut, swErr) = (new StringWriter(), new StringWriter())
-            let (oldOut, oldErr) = (Console.Out, Console.Error)
-            try
-                Console.SetOut swOut
-                Console.SetError swErr
-                let r = Blade.Ide.ideCheck (Path.Combine(tmpDir, "nope.blade"))
-                (r, swOut.ToString(), swErr.ToString())
-            finally
-                Console.SetOut oldOut
-                Console.SetError oldErr
-        let name = "ide check --json on a missing file still emits JSON and exit 1"
-        if code = 1 && out.Contains "File not found" && out.Contains "\"bindings\":[]" then
-            record name TH.Pass ""
-        else
-            record name TH.Fail $"exit {code}, json: {out.Trim()}"
-
-        // THE RENDER FAST PATH. The camera stays in the CELL -- the notebook
-        // keeps saying where the lens points -- and what the lane COMPILES is
-        // that program with the camera erased into a run-time CSV read. The
-        // erased source is the same bytes for every camera, which is the whole
-        // mechanism: build once, re-run per gesture.
-        //
-        // Pinned on the erasure rather than end to end, because e2e costs a
-        // g++ build and the risk lives here: a slot mapped to the wrong
-        // binding renders a plausible picture of the wrong place.
-        let camSrc =
-            "import plot\n\nlet a: Int64 = 1\n\nlet cam_cx: Float64 = -0.5\n"
-            + "let cam_cy: Float64 = 0.25\nlet cam_r: Float64 = 0.004\nlet cam_px: Int64 = 256\n"
-            + "\nlet z = cam_cx + cam_r\n"
-        let name = "the camera erasure rewrites each binding to its own CSV slot"
-        match Blade.IdeServe.cameraErasedSource camSrc ["cam_cx"; "cam_cy"; "cam_r"]
-                                                @"C:\tmp\camera.csv" with
-        | Ok out when out.StartsWith "import csv as __blade_cam_csv"
-                      && out.Contains "let cam_cx: Float64 = __blade_cam_slots(0, 0)"
-                      && out.Contains "let cam_cy: Float64 = __blade_cam_slots(0, 1)"
-                      && out.Contains "let cam_r: Float64 = __blade_cam_slots(0, 2)"
-                      // Not named, so not erased: the resolution stays literal.
-                      && out.Contains "let cam_px: Int64 = 256"
-                      // Forward slashes -- a Windows separator inside a Blade
-                      // string literal would read as an escape.
-                      && out.Contains "__blade_cam_csv.load(\"C:/tmp/camera.csv\")"
-                      // The reader precedes the EARLIEST camera binding, and so
-                      // precedes every use of the camera.
-                      && out.IndexOf "__blade_cam_slots = " < out.IndexOf "let cam_cx: Float64 =" ->
-            record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        let name = "the camera erasure preserves bounded annotations and trailing comments"
-        let bounded = "let cam_r: Float64<min=0.0, max=1.0> = 0.1 // keep\r\n"
-        match Blade.IdeServe.cameraErasedSource bounded ["cam_r"] "c.csv" with
-        | Ok out when out.Contains "let cam_r: Float64<min=0.0, max=1.0> = __blade_cam_slots(0, 0) // keep\r\n" ->
-            record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        let name = "the camera erasure accepts an unannotated binding without counting a local shadow"
-        let local = "function f() = { let cam_r = 0.2; cam_r }\nlet cam_r = 0.1\n"
-        match Blade.IdeServe.cameraErasedSource local ["cam_r"] "c.csv" with
-        | Ok out when out.Contains "let cam_r = __blade_cam_slots(0, 0)"
-                      && out.Contains "function f() = { let cam_r = 0.2; cam_r }" ->
-            record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        let name = "the camera erasure is unchanged when only typed camera values move"
-        let moved = camSrc.Replace("-0.5", "0.750000001").Replace("0.25", "-1.0").Replace("0.004", "0.000000000001")
-        match Blade.IdeServe.cameraErasedSource camSrc ["cam_cx"; "cam_cy"; "cam_r"] "c.csv",
-              Blade.IdeServe.cameraErasedSource moved ["cam_cx"; "cam_cy"; "cam_r"] "c.csv" with
-        | Ok before, Ok after when before = after -> record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        let name = "the camera erasure refuses static and destructured targets"
-        let invalidTargets = [ "let static cam_r = 0.1\n"; "let (cam_r, other) = (0.1, 0.2)\n" ]
-        let refused =
-            invalidTargets |> List.forall (fun src ->
-                match Blade.IdeServe.cameraErasedSource src ["cam_r"] "c.csv" with
-                | Error e -> e.Contains "simple runtime let"
-                | _ -> false)
-        if refused then record name TH.Pass "" else record name TH.Fail "an unsupported target was not refused"
-
-        // ...and the refusals, which are the safety property. A camera name the
-        // erasure cannot pin down exactly once would leave a literal standing
-        // and render from a camera the caller never set -- silently, and to a
-        // picture that looks entirely reasonable.
-        let name = "the camera erasure refuses a name bound more than once"
-        let dupSrc = "let cam_r: Float64 = 0.1\n\nlet cam_r = 0.2\n"
-        match Blade.IdeServe.cameraErasedSource dupSrc ["cam_r"] "c.csv" with
-        | Error e when e.Contains "cam_r" && e.Contains "2 times" -> record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        let name = "the camera erasure refuses a name that is not bound at all"
-        match Blade.IdeServe.cameraErasedSource ("let q: Int64 = 1\n") ["cam_r"] "c.csv" with
-        | Error e when e.Contains "cam_r" && e.Contains "0 times" -> record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        let name = "the camera erasure refuses repeated requested binding names"
-        match Blade.IdeServe.cameraErasedSource "let cam_r: Float64 = 0.1\n" ["cam_r"; "cam_r"] "c.csv" with
-        | Error e when e.Contains "requested more than once" -> record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        let name = "the camera reader preserves an indented declaration's whitespace"
-        match Blade.IdeServe.cameraErasedSource "  let cam_r: Float64 = 0.1\r\n" ["cam_r"] "c.csv" with
-        | Ok out when out.Contains "read\n  let cam_r: Float64 = __blade_cam_slots(0, 0)\r\n" ->
-            record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        // The camera crosses as text, so it has to cross EXACTLY: a lens moved
-        // by one ulp at a 1e-13 half-span is a different picture.
-        let name = "a camera row round-trips its Float64s exactly"
-        let camVals = [ -0.743643887037151; 0.131825904205330; 0.004 ]
-        let camBack =
-            (Blade.IdeServe.cameraCsvText camVals).Trim().Split(',')
-            |> Array.map float |> List.ofArray
-        if camBack = camVals then record name TH.Pass ""
-        else record name TH.Fail (sprintf "%A" camBack)
-
-        // A render re-runs the WHOLE program, so it re-emits every plot the
-        // notebook has -- but a camera change can only alter the plots that read
-        // the camera. Sending the rest replays the notebook into the panel: a
-        // fixed tour under a stable id animates its entire descent again on
-        // every zoom and lands back where it started, which is exactly how this
-        // was reported.
-        let name = "an unchanged frame is not re-sent"
-        let same = [| "a"; "b"; "c" |]
-        match Blade.IdeServe.changedFrameIndices same same with
-        | [||] -> record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        // ...and the direction that must never be wrong. Holding back a frame
-        // that DID move leaves a stale picture on screen, so a differing digest
-        // and anything past the end of the previous run both count as changed.
-        let name = "a moved frame is sent, and only that one"
-        match Blade.IdeServe.changedFrameIndices [| "a"; "b"; "c" |] [| "a"; "B"; "c" |] with
-        | [| 1 |] -> record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        let name = "frames past the previous run's end are always sent"
-        match Blade.IdeServe.changedFrameIndices [| "a" |] [| "a"; "b"; "c" |] with
-        | [| 1; 2 |] -> record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        // The first render of a session has nothing to compare against, and the
-        // panel has not seen this executable's output: send all of it.
-        let name = "the first render sends every frame"
-        match Blade.IdeServe.changedFrameIndices [||] [| "a"; "b" |] with
-        | [| 0; 1 |] -> record name TH.Pass ""
-        | other -> record name TH.Fail (sprintf "%A" other)
-
-        // Protocol refusals, and that the loop SURVIVES them: a bad render
-        // request must not take the notebook's language server down with it.
-        let (code, responses, _) =
-            drive [ renderReq 1 "nb" ["cam_r"] [1.0; 2.0]; pingReq 2; shutdownReq ]
-        let name = "render refuses a bindings/values mismatch and keeps serving"
-        match responses with
-        | [err; pong] when code = 0 && err.Contains "\"error\""
-                           && err.Contains "1 bindings and 2 values"
-                           && pong.Contains "\"ok\":true" ->
-            record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        let (code, responses, _) =
-            drive [ renderReq 1 "ghost" ["cam_r"] [0.1]; pingReq 2; shutdownReq ]
-        let name = "render on a session that has evaluated nothing says so"
-        match responses with
-        | [err; pong] when code = 0 && err.Contains "evaluated nothing to render"
-                           && pong.Contains "\"ok\":true" ->
-            record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
-
-        // ---- What `blade check` reports, the editor reports ---------------
-        // Each case below is a diagnostic the CLI printed and this payload
-        // dropped, mis-placed, or could not correlate.
-        let count (needle: string) (hay: string) =
-            let mutable n = 0
-            let mutable i = hay.IndexOf(needle, StringComparison.Ordinal)
-            while i >= 0 do
-                n <- n + 1
-                i <- hay.IndexOf(needle, i + needle.Length, StringComparison.Ordinal)
-            n
-        let oneCheck (tier: string) (file: string) (source: string) =
-            match drive [checkReq 1 tier (Path.Combine(tmpDir, file)) source; shutdownReq] with
-            | (0, [r], _) -> r
-            | (code, responses, _) -> sprintf "<exit %d, responses %A>" code responses
-        let head (s: string) = if s.Length > 500 then s.Substring(0, 500) else s
-
-        // BL4010 is two things: the pin suggestion (which rides its own
-        // channel as well as the warning log) and the constrained-domain
-        // advisories (which ride the warning log alone). Skipping the code
-        // wholesale to avoid a duplicate dropped the second kind entirely.
-        let domainSource =
-            "static struct Prod { i: Int32<min=0, max=6>, j: Int32<min=0, max=6> } where (i * j) % 3 == 1\n"
-            + "let R = method_for(range<Prod>) <@> lambda(i, j) -> i * 10 + j |> compute\n"
-        let body = oneCheck "fast" "domain.blade" domainSource
-        let name = "a constrained-domain advisory (BL4010 off the warning log) reaches the payload, at its span"
-        if count "\"code\":\"BL4010\"" body = 1 && body.Contains "not closed-form"
-           && body.Contains "\"line\":2,\"col\":20" then record name TH.Pass ""
-        else record name TH.Fail (head body)
-        let body = oneCheck "fast" "warn.blade" warnSource
-        let name = "a pin suggestion is still reported exactly once"
-        if count "\"code\":\"BL4010\"" body = 1 then record name TH.Pass ""
-        else record name TH.Fail (sprintf "%d BL4010 in %s" (count "\"code\":\"BL4010\"" body) (head body))
-
-        // A lowering refusal carries a span, and the full tier used to throw
-        // it away: the CLI pointed at the expression, the editor at 1:1.
-        let lowerRefusal =
-            "function f(x: Array<Float64 like Idx<5>>) -> Float64 = {\n"
-            + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
-            + "    let c = compound(x, m)\n"
-            + "    reduce(c, (+))\n"
-            + "}\n"
-            + "let a = Float64([1.0, 2.0, 3.0, 4.0, 5.0])\n"
-            + "let s = f(a)\n"
-        let body = oneCheck "full" "lower.blade" lowerRefusal
-        // This is also the file that TYPECHECKS but will not lower: the fast
-        // half of the payload survives intact beside the lowering diagnostic.
-        let name = "tier=full reports a lowering refusal (BL6002) at ITS span, not 1:1, bindings intact"
-        if body.Contains "\"tier\":\"full\"" && body.Contains "\"code\":\"BL6002\""
-           && body.Contains "\"line\":3,\"col\":13"
-           && body.Contains "\"name\":\"f\"" && body.Contains "\"name\":\"s\"" then
-            record name TH.Pass ""
-        else record name TH.Fail (head body)
-
-        // "Void" is not a more concrete spelling of a static tuple's type; it
-        // is what lowering leaves behind once the static evaluator has
-        // consumed the binding.
-        let body = oneCheck "full" "statictuple.blade" "let static dims = (2, 3)\nlet n: Int64 = 4\n"
-        let name = "tier=full never upgrades a binding's type to Void"
-        if body.Contains "\"name\":\"dims\"" && not (body.Contains "\"concreteType\":\"Void\"") then
-            record name TH.Pass ""
-        else record name TH.Fail (head body)
-
-        // A store that cannot be read is reported AT THE LOAD, by the tier the
-        // editor runs on every keystroke. It used to be reported nowhere on
-        // the fast tier, and as whatever first needed the store's types on
-        // the full one.
-        let body =
-            oneCheck "fast" "nostore.blade"
-                "import zarr as z\nlet s = z.load(\"definitely_absent_store\")\nlet n: Int64 = 1\n"
-        let name = "a store that cannot be read is BL2008 at the load site, on the fast tier"
-        if body.Contains "\"code\":\"BL2008\"" && body.Contains "\"line\":2,\"col\":9"
-           && body.Contains "not a Zarr store" then record name TH.Pass ""
-        else record name TH.Fail (head body)
-
-        // `"\ud83d"` is valid JSON and invalid UTF-16 (what a JavaScript
-        // client writes for a buffer cut mid-emoji). The check must be
-        // ANSWERED, under its own id: an id-less error cannot be correlated,
-        // and the client's request then sits until its timeout kills the
-        // process and every session with it.
-        let surrogateReq =
-            "{\"id\":41,\"cmd\":\"check\",\"tier\":\"fast\",\"file\":\"" + esc (Path.Combine(tmpDir, "sur.blade"))
-            + "\",\"source\":\"let s = \\\"\\ud83d\\\"\\nlet t = 1\\n\"}"
-        let (code, responses, _) = drive [surrogateReq; pingReq 42; shutdownReq]
-        let name = "a lone surrogate in `source` is checked and answered under the request's id"
-        match responses with
-        | [r; pong] when code = 0 && r.Contains "\"id\":41" && r.Contains "\"name\":\"t\""
-                         && not (r.Contains "\"error\"") && pong.Contains "\"id\":42" ->
-            record name TH.Pass ""
-        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code (responses |> List.map head))
-
-        // ---- Session directories of dead processes -------------------------
-        // A killed daemon cannot remove its sessions' temp directories; the
-        // next one to start does. Driven against a private root with a fake
-        // liveness oracle: nothing here kills a process or waits a day.
-        let sweepRoot = Path.Combine(tmpDir, "sweep")
-        let mkSession (suffix: string) (owner: int option) (ageHours: float) =
-            let dir = Path.Combine(sweepRoot, Blade.ReplSession.sessionDirPrefix + suffix)
-            Directory.CreateDirectory dir |> ignore
-            File.WriteAllText(Path.Combine(dir, "session.blade"), "let x: Int64 = 1\n")
-            (match owner with
-             | Some pid -> File.WriteAllText(Path.Combine(dir, Blade.ReplSession.ownerMarkerName), string pid)
-             | None -> ())
-            Directory.SetLastWriteTimeUtc(dir, DateTime.UtcNow.AddHours(-ageHours))
-            dir
-        let liveOwned = mkSession "live0001" (Some 111) 48.0
-        let deadOwned = mkSession "dead0001" (Some 222) 0.0
-        let oldUnmarked = mkSession "old00001" None 48.0
-        let newUnmarked = mkSession "new00001" None 1.0
-        let unrelated = Path.Combine(sweepRoot, "not-a-session")
-        Directory.CreateDirectory unrelated |> ignore
-        let removed =
-            Blade.ReplSession.sweepStaleSessionDirs sweepRoot (fun pid -> pid = 111) DateTime.UtcNow
-        let name = "the session sweep removes a dead owner's directory and an old unmarked one, nothing else"
-        if removed = 2
-           && Directory.Exists liveOwned && not (Directory.Exists deadOwned)
-           && not (Directory.Exists oldUnmarked) && Directory.Exists newUnmarked
-           && Directory.Exists unrelated then record name TH.Pass ""
-        else
-            record name TH.Fail
-                (sprintf "removed %d; live %b dead %b old %b new %b other %b" removed
-                    (Directory.Exists liveOwned) (Directory.Exists deadOwned)
-                    (Directory.Exists oldUnmarked) (Directory.Exists newUnmarked) (Directory.Exists unrelated))
-        let name = "a new session directory names this process as its owner"
-        let probe = Blade.ReplSession.ReplSession(entryDir)
-        (try
-            let marker = Path.Combine(probe.SessionDir, Blade.ReplSession.ownerMarkerName)
-            if File.Exists marker && (File.ReadAllText marker).Trim() = string Environment.ProcessId then
-                record name TH.Pass ""
-            else record name TH.Fail $"no owner marker under {probe.SessionDir}"
-         finally probe.Cleanup())
+        let runServe = runServeCases record tmpDir
+        runServe ideServePingCases
+        ideServeTierCases record tmpDir
+        runServe ideServeStoreCases
+        ideServeProviderPayload record tmpDir
+        runServe ideServeLoopCases
+        ideServeOneShotLane record tmpDir
+        runCameraCases record ideServeCameraCases
+        ideServeCameraRelations record
+        runCameraCases record ideServeCameraRefusalCases
+        ideServeCameraCsv record
+        runFrameCases record ideServeFrameCases
+        runServe ideServeRenderAndPayloadCases
+        ideServeSessionSweep record tmpDir entryDir
     finally
         Directory.SetCurrentDirectory entryDir
         try Directory.Delete(tmpDir, true) with _ -> ()
@@ -6015,7 +6248,7 @@ let private corpusCategoryExists (lane: string) (cat: string) : bool =
 /// that the few hand-written facts still describe the disk: the exclusions
 /// name real directories, every multi-file directory has a runner, and every
 /// directory answers to `blade test <its-name>`.
-let internal runCorpusWiringTests () : TH.BlockResult =
+let internal runCorpusWiringTestsWith (resolveTest: string list -> TestInvocation) () : TH.BlockResult =
     let blockName = "Corpus Wiring"
     TH.printHeader "Corpus Wiring (every tests/corpus directory is consumed)"
     let results = ResizeArray<string * TH.Outcome>()
@@ -6070,6 +6303,17 @@ let internal runCorpusWiringTests () : TH.BlockResult =
                 (tests |> List.map fst) <> want)
     record "every single-file directory answers to blade test <its-name>" misKeyed.IsEmpty
         (if misKeyed.IsEmpty then "" else $"unresolved or mis-wired: {listed misKeyed}")
+    // The usage's test-block keys (CliCommands.usageTestBlockKeys, printed by
+    // a bare `blade`) are a hand list beside the dispatcher's key table: every
+    // one must reach a test block, never the corpus-category fallback or the
+    // unknown-category refusal.
+    let unknownUsageKeys =
+        Blade.CliCommands.usageTestBlockKeys |> List.filter (fun k ->
+            match resolveTest [ k ] with
+            | Key _ | Knobs _ -> false
+            | _ -> true)
+    record "every test-block key the usage lists resolves to a test block" unknownUsageKeys.IsEmpty
+        (if unknownUsageKeys.IsEmpty then $"{Blade.CliCommands.usageTestBlockKeys.Length} keys" else $"not a test block: {listed unknownUsageKeys}")
     // The smoke sample (`blade test smoke`, the CI lane on every push) takes
     // at least one file from EVERY single-file directory: a directory it
     // skipped would be one a push never compiles.
@@ -6157,13 +6401,442 @@ let internal runCorpusWiringTests () : TH.BlockResult =
 
 /// Run the full suite, appending the CLI smoke block and the strict-pin block
 /// (which live in this file -- see runAllTestsFullWith's doc comment for why they're passed in).
-let internal runFullSuite opts =
+/// `resolveTest` is the `blade test` resolver the CLI smoke and corpus-wiring blocks read.
+let internal runFullSuiteWith (resolveTest: string list -> TestInvocation) opts =
     runAllTestsFullWith
-        [runCliSmokeTests; runStrictPinTests; runValidationCodeTests; runSurfacingTests; runSurfaceTests
+        [runCliSmokeTestsWith resolveTest; runStrictPinTests; runValidationCodeTests; runSurfacingTests; runSurfaceTests
          runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests
          (fun () -> Blade.Tests.KnobsTests.runKnobsSyncTests suiteClearedKnobs suitePinnedKnobs)
          Blade.Tests.IRTraversalTests.runIrTraversalFastTests
-         runCorpusWiringTests] opts
+         runCorpusWiringTestsWith resolveTest] opts
+
+// --- The `blade test` key map as data (K18) ---
+//
+// Every single-word `blade test <key>` is a row of `testKeyTable`: its
+// spellings and the blocks it runs. `resolveTestInvocation` turns the words
+// after `test` into a `TestInvocation` WITHOUT running anything (it reads the
+// corpus directory only where the dispatch has to: the unknown-category
+// guard of the lane forms and the corpus-category fallback);
+// `dispatchTestClean` runs what it resolved to. (The types are declared
+// above the CLI smoke block, whose cases and the corpus-wiring block's read
+// the resolver they are handed.)
+
+/// The single-word keys, in the dispatcher's order (the first row naming a
+/// key answers it).
+let internal testKeyTable : TestKeyRow list =
+    [ // The --strict-pins CLI gate standalone. In-process, no toolchain; also part of the full suite.
+      { Keys = [ "strict-pins"; "strictpins" ]; Run = Blocks [ runStrictPinTests ] }
+      // IR-validation backstops keep their own code at the CLI. In-process,
+      // no toolchain; also part of the full suite.
+      { Keys = [ "validation-codes"; "validationcodes" ]; Run = Blocks [ runValidationCodeTests ] }
+      // THE SMOKE SAMPLE (Corpus.smokeSample): from every single-file corpus
+      // directory its first file and every file numbered a multiple of
+      // Corpus.smokeStride, reject probes included, on the default lane --
+      // the corpus programs the CI `smoke` lane compiles and runs on every
+      // push and pull request (the whole corpus is nightly).
+      { Keys = [ "smoke" ]
+        Run =
+          Exits (fun () ->
+              let sample = Blade.Tests.Corpus.smokeSample ()
+              let tests = sample |> List.collect snd
+              printfn "Smoke sample: %d programs from %d corpus directories (first file + every number divisible by %d)"
+                  tests.Length sample.Length Blade.Tests.Corpus.smokeStride
+              let r = runTestCategoryFull "Smoke" tests "./generated_cpp_tests"
+              if r.Failed = 0 then 0 else 1) }
+      { Keys = [ "ir-traversal"; "irtraversal" ]; Run = Blocks [ Blade.Tests.IRTraversalTests.runIrTraversalTests ] }
+      // Every tests/corpus directory is consumed by the default suite, the
+      // interpreter differential and a `blade test <dir>` key. In-process,
+      // no toolchain; also part of the full suite.
+      { Keys = [ "corpus-wiring"; "corpuswiring" ]
+        Run = WithResolver (fun resolve -> if (runCorpusWiringTestsWith resolve ()).Failed = 0 then 0 else 1) }
+      // Every ```blade block in CLAUDE.md and docs/: checked through the
+      // corpus front end, run when it pins values, refused when tagged
+      // `rejects`; `sketch` blocks are skipped (tests/DocTests.fs).
+      { Keys = [ "docs" ]; Run = Blocks [ (fun () -> Blade.Tests.DocTests.runDocTests None) ] }
+      // Warning/suggestion surfacing: codes, streams, and survival of the checker's error path.
+      { Keys = [ "surfacing" ]; Run = Blocks [ runSurfacingTests ] }
+      // The language-surface dump: renderer shape, the serve arm, and the
+      // committed protocol/ snapshots (freshness + the diagnostics KB).
+      { Keys = [ "surface" ]; Run = Blocks [ runSurfaceTests ] }
+      // The NDJSON daemon protocol, driven in-process. No toolchain, no spawn.
+      { Keys = [ "ide-serve"; "ideserve" ]; Run = Blocks [ runIdeServeTests ] }
+      // The notebook lane: session semantics over NDJSON, interpreter only.
+      { Keys = [ "ide-eval"; "ideeval" ]; Run = Blocks [ runIdeEvalTests ] }
+      // The notebook lane's check half: assembly + per-cell windows.
+      { Keys = [ "ide-cells"; "idecells" ]; Run = Blocks [ runIdeCellsTests ] }
+      // The navigation payload: definition/use spans, shadowing, name tokens.
+      { Keys = [ "ide-references"; "idereferences"; "ide-refs" ]; Run = Blocks [ runIdeReferencesTests ] }
+      // gram/matmul/dot/gemv route to blade_linalg:: when the BLAS gate is
+      // on, else Blade's own loops; shim inclusion, routing policy table.
+      // Plus the runtime contiguity probe (needs g++): n=2 packed-symmetric
+      // must be REFUSED, not handed to BLAS past its pool.
+      { Keys = [ "linalg" ]
+        Run =
+          Blocks
+            [ Blade.Tests.LinAlgTests.runLinAlgEmissionTests
+              Blade.Tests.LinAlgTests.runLinAlgProbeTests
+              Blade.Tests.LinAlgTests.runSyrkTileTests
+              Blade.Tests.LinAlgTests.runRowContractionTileTests
+              Blade.Tests.LinAlgTests.runBlasTierTests ] }
+      // The antisym-pair and rank-3 simplex tiles alone: emission routes,
+      // raw-bit vs the serial forms (contract=off) and the one-fma chains
+      // (contract=fast), vfmadd census.
+      { Keys = [ "row-tile"; "rowtile"; "antisym-tile"; "simplex-tile" ]; Run = Blocks [ Blade.Tests.LinAlgTests.runRowContractionTileTests ] }
+      // The packed-triangle SYRK tile alone: raw-bit vs the serial prodsum
+      // (contract=off) and the one-fma chain (contract=fast), vfmadd census.
+      { Keys = [ "syrk-tile"; "syrktile" ]; Run = Blocks [ Blade.Tests.LinAlgTests.runSyrkTileTests ] }
+      // The explicit K-lane vector fold forms (review M9/M14): raw-bit vs
+      // the scalar model of the lane tree in both contraction modes, the
+      // Path B partition threaded vs serial-within-chunk, vfmadd census.
+      { Keys = [ "fold-lanes"; "foldlanes" ]; Run = Blocks [ Blade.Tests.LinAlgTests.runFoldLanesTests ] }
+      // Structural pins for the doctor's rows and JSON shape; the probes
+      // run for real but machine-dependent statuses are not asserted.
+      { Keys = [ "doctor" ]; Run = Blocks [ Blade.Tests.DoctorTests.runDoctorTests ] }
+      // Which capture each closure site emits: a closure VALUE copies
+      // (`[=] ... mutable`), a kernel wrapper and a closure over a
+      // reassigned binding keep `[&]`. Pure codegen string checks.
+      { Keys = [ "closure-capture" ]; Run = Blocks [ Blade.Tests.Functions.runClosureCaptureEmissionTests ] }
+      // `blade setup`'s pure halves: argument parsing + the toolchain-file
+      // merge/remove roundtrip. No network, no git, no make.
+      { Keys = [ "setup" ]; Run = Blocks [ Blade.Tests.SetupTests.runSetupTests ] }
+      // The cross-module corpus (tests/corpus/multifile), standalone. Also
+      // part of the full suite; broken out because it is the only slice that
+      // exercises `lowerMultiSource` and therefore the only one that can see
+      // a cross-module shape specialization.
+      { Keys = [ "multifile" ]
+        Run = Blocks [ (fun () -> runMultiFileTestsFull "Multi-File Modules" multiFileTests "./generated_cpp_tests") ] }
+      // File-based module resolution + stdlib/units/SI.blade: search path,
+      // transitive walk, cycle/duplicate/missing refusals, and the
+      // byte-identity claim for a file with no imports. Needs real files, so
+      // it writes a scratch tree under TEMP; front-end only apart from one
+      // value case that skips without g++.
+      { Keys = [ "module-resolve"; "moduleresolve"; "modres" ]; Run = Blocks [ Blade.Tests.ModuleResolveTests.runModuleResolveTests ] }
+      // Which call sites earn a shape-specialized copy and which decline.
+      // Pure lowering + codegen, no toolchain.
+      { Keys = [ "shapespec"; "shape-spec" ]; Run = Blocks [ Blade.Tests.ShapeSpecTests.runShapeSpecTests ] }
+      // Which index tags reach the flat elementwise path and which decline.
+      // Pure lowering + codegen, no toolchain.
+      { Keys = [ "flatpath"; "flat-path" ]; Run = Blocks [ Blade.Tests.FlatPathTests.runFlatPathTests ] }
+      // Which caret-parameter reads carry a BL8006 guard: the array
+      // instance at a named axis does, a proven position does not, and an
+      // anonymous slot is proven or checked like a named one (G192 (1), both
+      // lanes' emission). Pure lowering + codegen, no toolchain.
+      { Keys = [ "instance-guards"; "instanceguards" ]; Run = Blocks [ Blade.Tests.IndexTypes.runInstanceGuardEmissionTests ] }
+      // The halo access record and the reverse-mode halo route
+      // differential: gather vs scatter, byte-for-byte on the same
+      // programs. Emission pins run everywhere; the differential needs g++.
+      { Keys = [ "access" ]; Run = Blocks [ Blade.Tests.AccessTests.runAccessTests ] }
+      // The RNG mirror's Philox4x32-10 generator against Random123's
+      // published known-answer vectors, and the `_at` address identities.
+      { Keys = [ "rand-mirror" ]; Run = Blocks [ Blade.Tests.RandMirrorTests.runRandMirrorTests ] }
+      // The precompiled prelude (Build.fs, BLADE_PCH): built at the second
+      // sighting, used after, and a compile that fails with it re-run without.
+      { Keys = [ "pch" ]; Run = Blocks [ Blade.Tests.PchTests.runPchTests ] }
+      // Gap G92: a reassigned array frees its previous pool (owned move).
+      { Keys = [ "owned-move"; "ownedmove" ]; Run = Blocks [ Blade.Tests.OwnedMoveTests.runOwnedMoveTests ] }
+      // Round-2 cell epilogues (B1 / B2r): the licensed and threaded forms
+      // by raw bits, NEW vs BLADE_CELL_EPILOGUE=0, both contraction modes,
+      // fixed team sizes; the LLVM lane's parity under the identity regime.
+      { Keys = [ "cell-epilogue"; "cellepilogue" ]; Run = Blocks [ Blade.Tests.CellEpilogueTests.runCellEpilogueTests ] }
+      // Wave 3 (E-G5): the threaded `let rec` step -- the threaded build
+      // vs the threads-off build by raw bits (trajectory, scalar, observed
+      // team) at fixed team sizes, licensed and repro.
+      { Keys = [ "rec-step"; "recstep" ]; Run = Blocks [ Blade.Tests.RecStepTests.runRecStepTests ] }
+      // The ordered orbit scatter executed in both lanes against walk-forced
+      // twins under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off: finite-value
+      // identity, signed zero, NaN-equivalence, at every scatter_g and with
+      // the knob off.
+      { Keys = [ "orbit-scatter"; "orbitscatter" ]; Run = Blocks [ Blade.Tests.OrbitScatterTests.runOrbitScatterTests ] }
+      // The semantic-equivalence layer's emission pins: freeze-idiom
+      // recognition derives the break without the abort, `while` keeps
+      // both, non-absorbing guards decline. Pure lowering + codegen.
+      { Keys = [ "optimize" ]; Run = Blocks [ Blade.Tests.OptimizeTests.runOptimizeTests ] }
+      // math.eigh routes to blade_lapack::blade_eigh_{packed,dense}_{s,d,c,z}
+      // when the LAPACK gate is on with no explicit sweeps budget, else the
+      // cyclic-Jacobi source; complex tuple typing; BLAS/LAPACK dependency
+      // separation; inferEigh rejections (e.g. complex-symmetric).
+      { Keys = [ "lapack" ]; Run = Blocks [ Blade.Tests.LapackTests.runLapackEmissionTests ] }
+      // IR-level F# unit tests for the type normalizer. No Blade source pipeline.
+      { Keys = [ "normalize" ]; Run = Blocks [ runNormalizeTests ] }
+      // Display-frame BYTES + both channels (REPL sentinel line, `ide serve`
+      // display array). Drives the interpreter and the session engine
+      // directly -- no g++, no editor.
+      { Keys = [ "display-frames" ]; Run = Blocks [ Blade.Tests.Display.runDisplayTests ] }
+      // The GR render lane: renderPlot's frame bytes and argument rules, and
+      // the worker protocol against a fake helper the block writes itself.
+      // No GR needed -- the one case that wants a real gr-render skips.
+      { Keys = [ "gr-render" ]; Run = Blocks [ Blade.Tests.GrRender.runGrRenderTests ] }
+      // TypeCheck-level F# unit tests for the unify fast path: constructs
+      // IRType values directly and calls unify. No Blade source pipeline.
+      { Keys = [ "unify" ]; Run = Blocks [ runUnifyTests ] }
+      // IR-level F# unit tests for the validateArrowShape gate at
+      // mkVirtualArrayArrow entry. No Blade source pipeline.
+      { Keys = [ "validate-arrow" ]; Run = Blocks [ runValidateArrowTests ] }
+      // Type-level structural assertions on lowered Blade source: deduced IR
+      // type (rank, per-group arity+symmetry, elem type) via matchesTypePattern. No codegen/run.
+      { Keys = [ "type-structure" ]; Run = Blocks [ Blade.Tests.TypeStructure.runTypeStructureTests ] }
+      // IR-level F# unit tests for the exprAttrs bottom-up attribute
+      // computation. No Blade source pipeline.
+      { Keys = [ "attrs" ]; Run = Blocks [ runAttrsTests ] }
+      // F# unit tests for the contains-substitution mechanism in exprToCpp:
+      // renders IR fragments with populated and empty SubstMaps. No Blade source pipeline.
+      { Keys = [ "subst" ]; Run = Blocks [ runCodeGenSubstTests ] }
+      // F# unit tests for the canonical ExprShape traversal:
+      // childrenOf/rebuildWith round-trips, mapIRExpr identity, and
+      // collectVarRefsIR completeness. No Blade source pipeline.
+      { Keys = [ "shape" ]; Run = Blocks [ Blade.Tests.Shape.runShapeTests ] }
+      // Differential gate: this binary vs the pinned ./oracle build over
+      // the dense corpus slice -- identical printed VALUES required.
+      { Keys = [ "diff-oracle" ]
+        Run = Blocks [ (fun () -> Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" Blade.Tests.DiffOracle.denseSlice) ] }
+      // Optimizer differential: every corpus program (single-file
+      // categories + multifile) with every Blade.Optimize gate OFF vs ON.
+      // Emission-only for programs the optimizer leaves untouched; the
+      // rest are compiled and run both ways (needs g++). Standalone only.
+      { Keys = [ "opt-diff"; "optdiff" ]
+        Run = Blocks [ (fun () -> Blade.Tests.OptDiff.runOptDiffTests (Blade.Tests.Corpus.singleFileCategories ()) true) ] }
+      // The optimizer differential under the DEFAULT floating-point policy
+      // (licensed folds, contraction on), compared with the `test llvm`
+      // token rule (tests/OptDiff.fs runOptDiffTestsWith). Standalone only;
+      // the `opt-diff` lane's own time is unchanged.
+      { Keys = [ "opt-diff-licensed" ]
+        Run = Blocks [ (fun () -> Blade.Tests.OptDiff.runOptDiffTestsWith true (Blade.Tests.Corpus.singleFileCategories ()) true) ] }
+      // Interpreter differential gate: tree-walking IR interpreter vs the
+      // compiled binary over the supported corpus slice -- byte-identical normalized stdout required.
+      { Keys = [ "interp" ]
+        Run = Blocks [ (fun () -> Blade.Tests.InterpDiff.runInterpDiffTests (Blade.Tests.InterpDiff.currentSlice ())) ] }
+      // Error-location tests: deliberately broken sources, asserting the reported line. No C++ pipeline.
+      { Keys = [ "spans" ]; Run = Blocks [ Blade.Tests.Spans.runSpanTests ] }
+      // Diagnostics core (renderer + registry) and the diagnostics corpus
+      // (broken sources with pinned codes/spans). No C++ pipeline.
+      // BL4011 suggestions: pinned (and pinned-ABSENT) over the ml-equiv corpus.
+      { Keys = [ "diagnostics" ]
+        Run =
+          Blocks
+            [ Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests
+              Blade.Tests.DiagCorpus.runDiagCorpusTests
+              Blade.Tests.DiagCorpus.runCertSuggestTests ] }
+      // Deduction parity gate: the typed rep-status deduction vs the seam
+      // inference, proposal by proposal over the ml-equiv corpus. In-process, no C++ pipeline; also part of the full suite.
+      { Keys = [ "rep-differential"; "repdifferential" ]; Run = Blocks [ Blade.Tests.RepDifferential.runRepDifferentialTests ] }
+      // Declared-certificate agreement gate: the typed walker's SECOND
+      // OPINION on every certificate the elaboration seam already checked.
+      // Zero disagreements over the ml-equiv corpus (else a compiler bug).
+      { Keys = [ "rep-check"; "repcheck" ]; Run = Blocks [ Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ] }
+      // Rejection-parity census: the only gate that looks at REFUSED
+      // programs. For every ml-equiv reject-probe, measures what the typed
+      // walker would say by shadowing the `ml.equiv` pin so it reaches typecheck.
+      { Keys = [ "rep-reject"; "repreject" ]; Run = Blocks [ Blade.Tests.RepRejectCensus.runRepRejectCensusTests ] }
+      // Differential-harness oracles checked against hand-computed / analytic values.
+      { Keys = [ "oracles" ]; Run = Blocks [ Blade.Tests.OracleReview.runOracleTests ] }
+      // OrbIdx cardinality fold, canonicalizer, segment-peeled traversal
+      // stream, and rank/unrank pair (src/OrbRank.fs), pinned against
+      // brute-force canonicalization as SET and ORDER (a read->write roundtrip can't catch an order mismatch).
+      { Keys = [ "orbrank"; "orb-rank" ]; Run = Blocks [ Blade.Tests.OrbRankReview.runOrbRankTests ] }
+      // TreeIdx shape validation, the derived preorder tables, and the
+      // path <-> leaf-offset pair (src/TreeRank.fs), pinned against a
+      // brute-force recursion over an independent nested-shape ADT as SET and ORDER, plus subtree contiguity.
+      { Keys = [ "treerank"; "tree-rank" ]; Run = Blocks [ Blade.Tests.TreeRankReview.runTreeRankTests ] }
+      // T_{j,l} Sym-power occurrence tables (SymPowerTables.fs): exact
+      // rational kernel/Gram pins, the realization phase rule, realCG completeness.
+      { Keys = [ "sympower"; "sympower-tables" ]; Run = Blocks [ Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ] }
+      // Sym^k label basis checked against isotypic projectors from an
+      // independent Casimir-Lagrange route (exact integer/rational).
+      { Keys = [ "polyoracle"; "poly-oracle" ]; Run = Blocks [ Blade.Tests.PolyOracleReview.runPolyOracleTests ] }
+      // Exact so(3) generator tables and the radical-vector Lie discharger
+      // (MLLieDischarge.fs): assemble/exponentiate each table, compare
+      // against the real Wigner action fit from solid harmonics, plus exact
+      // algebra (skew-symmetry, brackets, Casimir) and negative controls.
+      { Keys = [ "lietables"; "lie-tables" ]; Run = Blocks [ Blade.Tests.LieTablesReview.runLieTablesTests ] }
+      // Sn permutation-module counting layer (MLPermSpec.fs): RGS partition
+      // enumeration vs the Stirling recurrence and an independent
+      // enumerator, witness-unitriangularity, perm_weight/bias_dim sizing.
+      { Keys = [ "permspec"; "perm-spec" ]; Run = Blocks [ Blade.Tests.PermSpecReview.runPermSpecTests ] }
+      // Coarsening-indicator basis checked for COMPLETENESS against the
+      // exact rational Reynolds projector over Q; Gram closed form from an
+      // independent union-find join. BigInteger fractions, no float/tolerance.
+      { Keys = [ "permoracle"; "perm-oracle" ]; Run = Blocks [ Blade.Tests.PermOracleReview.runPermOracleTests ] }
+      // Constrained-record COUNTING layer (StructIdxSpec.fs): box
+      // enumeration over per-field INCLUSIVE bounds with a two-route
+      // certificate (flat filter vs arrow-style heads filter, set AND
+      // order), the CGm112 anchor sweep, idx_card(R) via resolveStatics.
+      { Keys = [ "structidx"; "struct-idx" ]; Run = Blocks [ Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ] }
+      // Independently coded recursive per-field enumerator over the same
+      // solution sets, compared against StructIdxSpec.enumerateBox as SET and ORDER.
+      { Keys = [ "structidxoracle"; "struct-idx-oracle" ]; Run = Blocks [ Blade.Tests.StructIdxOracle.runStructIdxOracleTests ] }
+      // Point-group counting layer (MLPointSpec.fs): frozen {C4, D4} tables
+      // and their integrity certificate (closure vs declared order,
+      // orthogonality, FS indicators, R-Burnside trap sum), 9-vs-5 FS
+      // contrast, generic e-weighted core vs MLSpec.homDim/homBlocks (15-spec sweep).
+      { Keys = [ "pgspec"; "pg-spec" ]; Run = Blocks [ Blade.Tests.PointSpecReview.runPointSpecTests ] }
+      // Emitted point-group Hom basis checked for COMPLETENESS against the
+      // exact rational Reynolds projector over Q, Gram closed form d*I_e
+      // per cell, three negative controls. BigInteger fractions throughout.
+      { Keys = [ "pgoracle"; "pg-oracle" ]; Run = Blocks [ Blade.Tests.PgOracleReview.runPgOracleTests ] }
+      // Standalone C++ runtime-layout tests for the contiguous-backing
+      // allocate<>: contiguity/cardinality invariants value-checking Blade tests cannot catch.
+      { Keys = [ "alloc" ]; Run = Blocks [ Blade.Tests.AllocTests.runAllocLayoutTests ] }
+      // Standalone C++ wreath-class storage tests: segment-peeled traversal
+      // order, cardinality fold, rank/unrank bijection, canon signs, overflow walls.
+      { Keys = [ "orbwreath"; "orb-wreath" ]; Run = Blocks [ Blade.Tests.OrbWreathTests.runOrbWreathTests ] }
+      // Codegen-string checks: `where omp(...)` reaches C++ as a pragma for
+      // every kernel spelling, none for unannotated ones. No toolchain needed.
+      { Keys = [ "omp-pragma" ]; Run = Blocks [ Blade.Tests.OmpTests.runOmpPragmaTests ] }
+      // Comm-licensed parallel reductions: compile omp and serial spellings
+      // of the same fold, diff values; Path-B determinism, collapse(2) gates. Needs g++.
+      { Keys = [ "omp-reduce" ]; Run = Blocks [ Blade.Tests.OmpTests.runOmpReduceTests ] }
+      // OpenMP thread-coverage: generate loop programs with codegen
+      // test-mode instrumentation, compile -fopenmp, run with forced
+      // threads, verify emitted pragmas form genuine parallel regions.
+      { Keys = [ "omp-coverage" ]; Run = Blocks [ Blade.Tests.OmpTests.runOmpCoverageTests ] }
+      // CLI smoke: compile+run a one-line .edgi via the user-facing compileToExe path.
+      { Keys = [ "cli" ]; Run = WithResolver (fun resolve -> if (runCliSmokeTestsWith resolve ()).Failed = 0 then 0 else 1) }
+      // CUDA kernel block (differential vs host-loop oracle) plus cuBLAS
+      // swap-table verification. Skips without nvcc/GPU; on Windows run from x64 Native Tools prompt.
+      // The toolchain-free buffer/emission checks ride along (they also run
+      // in the full suite), so a targeted `test cuda` reaches them.
+      { Keys = [ "cuda" ]
+        Run =
+          Blocks
+            [ Blade.Tests.CudaTests.runBufferTypeTests
+              Blade.Tests.CudaTests.runCudaTests
+              Blade.Tests.CudaTests.runCublasSwapTests
+              Blade.Tests.CudaTests.runCublasFailureExitTests ] }
+      // MPI decomposition block (differential vs serial oracle under
+      // mpiexec -n 1/2/4). Skips without g++ / -lmsmpi / mpiexec.
+      { Keys = [ "mpi" ]; Run = Blocks [ Blade.Tests.MpiTests.runMpiTests ] }
+      // The BLADE_LLVM lane: byte-pinned .ll emission (no toolchain needed)
+      // plus the llvm-vs-C++ stdout differential over the scalar/functions/
+      // loops corpora. STANDALONE ONLY -- deliberately absent from
+      // isSuiteFlag and from FullSuiteOptions, so no combination of `blade
+      // test` flags can fold it into the default suite: it spawns two native
+      // compilers per corpus file. Skips cleanly without clang or g++.
+      { Keys = [ "llvm" ]; Run = Exits Blade.Tests.LlvmTests.runLlvmTests }
+      // The two-lane benchmark: codegen speed (IRProgram -> executable, per
+      // lane) and runtime over four non-power-of-two shapes. Standalone for
+      // the same reason `llvm` is, only more so -- it spawns hundreds of
+      // compiler and executable invocations. Never fails on a slow ratio;
+      // fails only on a refusal, a build error or a value disagreement.
+      { Keys = [ "llvm-bench"; "llvmbench" ]; Run = Exits Blade.Tests.LlvmTests.runLlvmBench }
+      // The ordinary suite with the CORPUS driven through the BLADE_LLVM lane
+      // instead of the C++ emitter.
+      //
+      // Distinct from `blade test llvm`, and the distinction is the point.
+      // That is a two-lane DIFFERENTIAL: it needs both compilers, and asks
+      // whether the lanes agree. This runs ONE lane and judges it against the
+      // corpus's own `// EXPECT:` pins -- no g++, one compiler per file, and
+      // an answer about the LLVM lane that does not depend on the C++ lane
+      // being right. Weaker per program (a pin covers only what it names) and
+      // stronger in reach.
+      //
+      // A program the lane refuses SKIPS. It is never handed to the C++
+      // emitter: `blade run`'s fallback is exactly wrong here, because it
+      // would count C++ coverage as the LLVM lane's.
+      { Keys = [ "--llvm-backend"; "llvm-backend" ]
+        Run =
+          WithResolver (fun resolve ->
+              match resolveClang () with
+              | None ->
+                  eprintfn "test --llvm-backend: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
+                  eprintfn "      An error, not a skip: without clang EVERY corpus test would skip and the run would look green."
+                  1
+              | Some clang ->
+                  printfn "Corpus back end: LLVM (clang: %s)" clang
+                  printfn "A program the lane refuses is SKIPPED, never handed to the C++ emitter, so the totals below are this lane's own.\n"
+                  setCorpusBackend LlvmBackend
+                  try runFullSuiteWith resolve defaultFullSuiteOptions
+                  finally setCorpusBackend CppBackend) }
+      // Deliberately NOT a member of isSuiteFlag. Spelling it like one is a
+      // reasonable guess given --omp/--cuda/--mpi, so say why it isn't
+      // instead of letting it fall through to "Unknown test category".
+      { Keys = [ "--llvm" ]
+        Run =
+          Exits (fun () ->
+              eprintfn "test: --llvm is not a full-suite flag -- the llvm lane spawns two native compilers per corpus file, so it is standalone only."
+              eprintfn "      Run 'blade test llvm' (or 'blade test llvm all' for every corpus category,"
+              eprintfn "      'blade test llvm <corpus-dir>' / 'blade test llvm goldens' / 'blade test llvm-bench')."
+              1) }
+      // Differential timing: (r!)^d speedup of comm-annotation and
+      // symmetric-type forms vs dense. Warns (never fails) on a slow ratio.
+      { Keys = [ "timing" ]; Run = Blocks [ Blade.Tests.Benchmarks.runDifferentialTimingTests ] }
+      // NetCDF provider tests 1-6 run against a mock NcFile. Tests 7-8 need
+      // sample.nc + libnetcdf, else SKIP.
+      { Keys = [ "netcdf" ]; Run = Exits Blade.Tests.NetcdfTests.runNetcdfTests }
+      // Zarr provider tests. Hermetic (fixtures generated on the fly); only
+      // the e2e compile+run blocks need g++ and skip without it.
+      { Keys = [ "zarr" ]; Run = Exits Blade.Tests.ZarrTests.runZarrTests }
+      // CSV provider tests. Fully hermetic; only the e2e compile+run blocks
+      // need g++ and skip without it.
+      { Keys = [ "csv" ]; Run = Exits Blade.Tests.CsvTests.runCsvTests }
+      // Icechunk provider tests. Fully hermetic; fixture repos are generated
+      // on the fly by IcechunkWrite; only the e2e compile+run block needs
+      // g++ and skips without it.
+      { Keys = [ "icechunk" ]; Run = Exits Blade.Tests.IcechunkTests.runIcechunkTests }
+      // The display print form (P3-26, src/PrintForm.fs): emission facts and
+      // the three lanes' display text. Also in the default suite (RunAll.fs
+      // yields `printForm`).
+      { Keys = [ "print-form"; "printform" ]; Run = Blocks [ Blade.Tests.PrintFormTests.runPrintFormTests ] }
+      // Input manifests + run records (plan-fortran-killer-2 section 7).
+      // Also in the default suite (RunAll.fs yields `runRecord`).
+      { Keys = [ "run-record"; "runrecord" ]; Run = Blocks [ Blade.Tests.RunRecordTests.runRunRecordTests ] }
+      // The icechunk checkout desugar (src/ProviderDesugar.fs). Pure
+      // in-process AST rewrite; no toolchain, no fixtures, never skips.
+      // Also in the default suite (RunAll.fs yields `providerDesugar`),
+      // unlike the store-backed provider lanes.
+      { Keys = [ "provider-desugar"; "providerdesugar" ]; Run = Exits Blade.Tests.ProviderDesugarTests.runProviderDesugarTests }
+      // Mixed-parallelism tests: order-table parse + gate-off degradation
+      // run always; mpi+omp differentials need mpiexec and skip without it.
+      { Keys = [ "hybrid" ]; Run = Exits Blade.Tests.HybridTests.runHybridTests } ]
+
+/// The row that answers the single-word key `key`, if any.
+let internal testKeyRow (key: string) : TestKeyRow option =
+    testKeyTable |> List.tryFind (fun row -> List.contains key row.Keys)
+
+/// Resolve the words after `test` without running anything.
+let internal resolveTestInvocation (rest: string list) : TestInvocation =
+    // `--omp` / `--cuda` / `--timing` / `--mpi` / `--interp` / `--diff-oracle`
+    // opt the corresponding blocks into the full suite, in any combination;
+    // each also has a standalone row in the table.
+    let isSuiteFlag f =
+        f = "--omp" || f = "--cuda" || f = "--timing" || f = "--mpi"
+        || f = "--interp" || f = "--diff-oracle"
+    match rest with
+    | [] -> FullSuite defaultFullSuiteOptions
+    | flags when flags |> List.forall isSuiteFlag ->
+        FullSuite { IncludeOmp = List.contains "--omp" flags
+                    IncludeCuda = List.contains "--cuda" flags
+                    IncludeTiming = List.contains "--timing" flags
+                    IncludeMpi = List.contains "--mpi" flags
+                    IncludeInterpDiff = List.contains "--interp" flags
+                    IncludeDiffOracle = List.contains "--diff-oracle" flags }
+    | [ "--ir-only" ] -> IrOnly
+    | [ "--gen" ] -> GenOnly
+    // Every single-word key. No arm above can take one (none is empty, a
+    // suite flag, --ir-only or --gen), and every arm below that can take a
+    // single word is the corpus-category fallback.
+    | [ key ] when (testKeyRow key).IsSome -> Key (testKeyRow key).Value
+    | "knobs" :: kargs -> Knobs kargs
+    // Only the pages whose repo-relative path contains `page`.
+    | [ "docs"; page ] -> DocsPage page
+    // The differential lanes that take a LITERAL tests/corpus/<dir> name:
+    // a name that is no such directory is a usage error, reported as one --
+    // it used to escape as an exception from the corpus loader and surface as
+    // BL9001, an "internal compiler error" for a typo.
+    | [ ("diff-oracle" | "interp" | "opt-diff" | "optdiff" | "opt-diff-licensed" | "llvm") as lane; cat ]
+            when not (corpusCategoryExists lane cat) ->
+        UnknownLaneCategory (lane, cat)
+    | [ ("diff-oracle" | "opt-diff" | "optdiff" | "opt-diff-licensed" | "interp" | "llvm") as lane; cat ] ->
+        LaneCategory (lane, cat)
+    | [ "--llvm-backend"; cat ] | [ cat; "--llvm-backend" ] -> LlvmBackendCategory cat
+    | [ cat ] ->
+        // Test a specific category: blade test basic, blade test loops, etc.
+        match resolveCategoryKey cat with
+        | Some (name, tests) -> Category (name, tests)
+        | None -> UnknownCategory cat
+    | _ -> Unrecognized
+
+/// Run the full suite (Cli.fs's `--full` and `blade test`'s suite forms).
+let internal runFullSuite opts = runFullSuiteWith resolveTestInvocation opts
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 ///
@@ -6204,510 +6877,57 @@ let rec internal dispatchTest (rest: string list) : int =
     TH.Timings.report timingsPath
     code
 
-/// `dispatchTest` after the environment is made pristine.
+/// `dispatchTest` after the environment is made pristine: run what the words
+/// resolve to (`resolveTestInvocation`).
 and internal dispatchTestClean (rest: string list) : int =
-    // `--omp` / `--cuda` / `--timing` / `--mpi` / `--interp` / `--diff-oracle`
-    // opt the corresponding blocks into the full suite, in any combination;
-    // each also has a standalone arm below.
-    let isSuiteFlag f =
-        f = "--omp" || f = "--cuda" || f = "--timing" || f = "--mpi"
-        || f = "--interp" || f = "--diff-oracle"
-    match rest with
-    | [] -> runFullSuite defaultFullSuiteOptions
-    | flags when flags |> List.forall isSuiteFlag ->
-        runFullSuite { IncludeOmp = List.contains "--omp" flags
-                       IncludeCuda = List.contains "--cuda" flags
-                       IncludeTiming = List.contains "--timing" flags
-                       IncludeMpi = List.contains "--mpi" flags
-                       IncludeInterpDiff = List.contains "--interp" flags
-                       IncludeDiffOracle = List.contains "--diff-oracle" flags }
-    | [ "--ir-only" ] -> runAllTests ()
-    | [ "--gen" ] -> runAllTestsGenOnly ()
-    | [ "strict-pins" ] | [ "strictpins" ] ->
-        // The --strict-pins CLI gate standalone. In-process, no toolchain; also part of the full suite.
-        let failed = (runStrictPinTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "validation-codes" ] | [ "validationcodes" ] ->
-        // IR-validation backstops keep their own code at the CLI. In-process,
-        // no toolchain; also part of the full suite.
-        let failed = (runValidationCodeTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "smoke" ] ->
-        // THE SMOKE SAMPLE (Corpus.smokeSample): from every single-file corpus
-        // directory its first file and every file numbered a multiple of
-        // Corpus.smokeStride, reject probes included, on the default lane --
-        // the corpus programs the CI `smoke` lane compiles and runs on every
-        // push and pull request (the whole corpus is nightly).
-        let sample = Blade.Tests.Corpus.smokeSample ()
-        let tests = sample |> List.collect snd
-        printfn "Smoke sample: %d programs from %d corpus directories (first file + every number divisible by %d)"
-            tests.Length sample.Length Blade.Tests.Corpus.smokeStride
-        let r = runTestCategoryFull "Smoke" tests "./generated_cpp_tests"
-        if r.Failed = 0 then 0 else 1
-    | "knobs" :: kargs -> if (Blade.Tests.KnobsTests.runKnobsTests suiteClearedKnobs suitePinnedKnobs kargs).Failed = 0 then 0 else 1
-    | [ "ir-traversal" ] | [ "irtraversal" ] -> if (Blade.Tests.IRTraversalTests.runIrTraversalTests ()).Failed = 0 then 0 else 1
-    | [ "corpus-wiring" ] | [ "corpuswiring" ] ->
-        // Every tests/corpus directory is consumed by the default suite, the
-        // interpreter differential and a `blade test <dir>` key. In-process,
-        // no toolchain; also part of the full suite.
-        let failed = (runCorpusWiringTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "docs" ] ->
-        // Every ```blade block in CLAUDE.md and docs/: checked through the
-        // corpus front end, run when it pins values, refused when tagged
-        // `rejects`; `sketch` blocks are skipped (tests/DocTests.fs).
-        let failed = (Blade.Tests.DocTests.runDocTests None).Failed
-        if failed = 0 then 0 else 1
-    | [ "docs"; page ] ->
-        // Only the pages whose repo-relative path contains `page`.
+    match resolveTestInvocation rest with
+    | FullSuite opts -> runFullSuite opts
+    | IrOnly -> runAllTests ()
+    | GenOnly -> runAllTestsGenOnly ()
+    | Key row ->
+        match row.Run with
+        | Blocks blocks ->
+            let failed = blocks |> List.sumBy (fun block -> (block ()).Failed)
+            if failed = 0 then 0 else 1
+        | Exits lane -> lane ()
+        | WithResolver lane -> lane resolveTestInvocation
+    | Knobs kargs -> if (Blade.Tests.KnobsTests.runKnobsTests suiteClearedKnobs suitePinnedKnobs kargs).Failed = 0 then 0 else 1
+    | DocsPage page ->
         let failed = (Blade.Tests.DocTests.runDocTests (Some page)).Failed
         if failed = 0 then 0 else 1
-    | [ "surfacing" ] ->
-        // Warning/suggestion surfacing: codes, streams, and survival of the checker's error path.
-        let failed = (runSurfacingTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "surface" ] ->
-        // The language-surface dump: renderer shape, the serve arm, and the
-        // committed protocol/ snapshots (freshness + the diagnostics KB).
-        let failed = (runSurfaceTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "ide-serve" ] | [ "ideserve" ] ->
-        // The NDJSON daemon protocol, driven in-process. No toolchain, no spawn.
-        let failed = (runIdeServeTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "ide-eval" ] | [ "ideeval" ] ->
-        // The notebook lane: session semantics over NDJSON, interpreter only.
-        let failed = (runIdeEvalTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "ide-cells" ] | [ "idecells" ] ->
-        // The notebook lane's check half: assembly + per-cell windows.
-        let failed = (runIdeCellsTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "ide-references" ] | [ "idereferences" ] | [ "ide-refs" ] ->
-        // The navigation payload: definition/use spans, shadowing, name tokens.
-        let failed = (runIdeReferencesTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "linalg" ] ->
-        // gram/matmul/dot/gemv route to blade_linalg:: when the BLAS gate is
-        // on, else Blade's own loops; shim inclusion, routing policy table.
-        // Plus the runtime contiguity probe (needs g++): n=2 packed-symmetric
-        // must be REFUSED, not handed to BLAS past its pool.
-        let emitFailed = (Blade.Tests.LinAlgTests.runLinAlgEmissionTests ()).Failed
-        let probeFailed = (Blade.Tests.LinAlgTests.runLinAlgProbeTests ()).Failed
-        let tileFailed = (Blade.Tests.LinAlgTests.runSyrkTileTests ()).Failed
-                         + (Blade.Tests.LinAlgTests.runRowContractionTileTests ()).Failed
-        let tierFailed = (Blade.Tests.LinAlgTests.runBlasTierTests ()).Failed
-        if emitFailed + probeFailed + tileFailed + tierFailed = 0 then 0 else 1
-    | [ "row-tile" ] | [ "rowtile" ] | [ "antisym-tile" ] | [ "simplex-tile" ] ->
-        // The antisym-pair and rank-3 simplex tiles alone: emission routes,
-        // raw-bit vs the serial forms (contract=off) and the one-fma chains
-        // (contract=fast), vfmadd census.
-        let failed = (Blade.Tests.LinAlgTests.runRowContractionTileTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "syrk-tile" ] | [ "syrktile" ] ->
-        // The packed-triangle SYRK tile alone: raw-bit vs the serial prodsum
-        // (contract=off) and the one-fma chain (contract=fast), vfmadd census.
-        let failed = (Blade.Tests.LinAlgTests.runSyrkTileTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "fold-lanes" ] | [ "foldlanes" ] ->
-        // The explicit K-lane vector fold forms (review M9/M14): raw-bit vs
-        // the scalar model of the lane tree in both contraction modes, the
-        // Path B partition threaded vs serial-within-chunk, vfmadd census.
-        let failed = (Blade.Tests.LinAlgTests.runFoldLanesTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "doctor" ] ->
-        // Structural pins for the doctor's rows and JSON shape; the probes
-        // run for real but machine-dependent statuses are not asserted.
-        let failed = (Blade.Tests.DoctorTests.runDoctorTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "closure-capture" ] ->
-        // Which capture each closure site emits: a closure VALUE copies
-        // (`[=] ... mutable`), a kernel wrapper and a closure over a
-        // reassigned binding keep `[&]`. Pure codegen string checks.
-        let failed = (Blade.Tests.Functions.runClosureCaptureEmissionTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "setup" ] ->
-        // `blade setup`'s pure halves: argument parsing + the toolchain-file
-        // merge/remove roundtrip. No network, no git, no make.
-        let failed = (Blade.Tests.SetupTests.runSetupTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "multifile" ] ->
-        // The cross-module corpus (tests/corpus/multifile), standalone. Also
-        // part of the full suite; broken out because it is the only slice that
-        // exercises `lowerMultiSource` and therefore the only one that can see
-        // a cross-module shape specialization.
-        let failed = (runMultiFileTestsFull "Multi-File Modules" multiFileTests "./generated_cpp_tests").Failed
-        if failed = 0 then 0 else 1
-    | [ "module-resolve" ] | [ "moduleresolve" ] | [ "modres" ] ->
-        // File-based module resolution + stdlib/units/SI.blade: search path,
-        // transitive walk, cycle/duplicate/missing refusals, and the
-        // byte-identity claim for a file with no imports. Needs real files, so
-        // it writes a scratch tree under TEMP; front-end only apart from one
-        // value case that skips without g++.
-        let failed = (Blade.Tests.ModuleResolveTests.runModuleResolveTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "shapespec" ] | [ "shape-spec" ] ->
-        // Which call sites earn a shape-specialized copy and which decline.
-        // Pure lowering + codegen, no toolchain.
-        let failed = (Blade.Tests.ShapeSpecTests.runShapeSpecTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "flatpath" ] | [ "flat-path" ] ->
-        // Which index tags reach the flat elementwise path and which decline.
-        // Pure lowering + codegen, no toolchain.
-        let failed = (Blade.Tests.FlatPathTests.runFlatPathTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "instance-guards" ] | [ "instanceguards" ] ->
-        // Which caret-parameter reads carry a BL8006 guard: the array
-        // instance at a named axis does, a proven position does not, and an
-        // anonymous slot is proven or checked like a named one (G192 (1), both
-        // lanes' emission). Pure lowering + codegen, no toolchain.
-        let failed = (Blade.Tests.IndexTypes.runInstanceGuardEmissionTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "access" ] ->
-        // The halo access record and the reverse-mode halo route
-        // differential: gather vs scatter, byte-for-byte on the same
-        // programs. Emission pins run everywhere; the differential needs g++.
-        let failed = (Blade.Tests.AccessTests.runAccessTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "rand-mirror" ] ->
-        // The RNG mirror's Philox4x32-10 generator against Random123's
-        // published known-answer vectors, and the `_at` address identities.
-        let failed = (Blade.Tests.RandMirrorTests.runRandMirrorTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "pch" ] ->
-        // The precompiled prelude (Build.fs, BLADE_PCH): built at the second
-        // sighting, used after, and a compile that fails with it re-run without.
-        let failed = (Blade.Tests.PchTests.runPchTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "owned-move" ] | [ "ownedmove" ] ->
-        // Gap G92: a reassigned array frees its previous pool (owned move).
-        let failed = (Blade.Tests.OwnedMoveTests.runOwnedMoveTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "cell-epilogue" ] | [ "cellepilogue" ] ->
-        // Round-2 cell epilogues (B1 / B2r): the licensed and threaded forms
-        // by raw bits, NEW vs BLADE_CELL_EPILOGUE=0, both contraction modes,
-        // fixed team sizes; the LLVM lane's parity under the identity regime.
-        let failed = (Blade.Tests.CellEpilogueTests.runCellEpilogueTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "rec-step" ] | [ "recstep" ] ->
-        // Wave 3 (E-G5): the threaded `let rec` step -- the threaded build
-        // vs the threads-off build by raw bits (trajectory, scalar, observed
-        // team) at fixed team sizes, licensed and repro.
-        let failed = (Blade.Tests.RecStepTests.runRecStepTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "orbit-scatter" ] | [ "orbitscatter" ] ->
-        // The ordered orbit scatter executed in both lanes against walk-forced
-        // twins under BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off: finite-value
-        // identity, signed zero, NaN-equivalence, at every scatter_g and with
-        // the knob off.
-        let failed = (Blade.Tests.OrbitScatterTests.runOrbitScatterTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "optimize" ] ->
-        // The semantic-equivalence layer's emission pins: freeze-idiom
-        // recognition derives the break without the abort, `while` keeps
-        // both, non-absorbing guards decline. Pure lowering + codegen.
-        let failed = (Blade.Tests.OptimizeTests.runOptimizeTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "lapack" ] ->
-        // math.eigh routes to blade_lapack::blade_eigh_{packed,dense}_{s,d,c,z}
-        // when the LAPACK gate is on with no explicit sweeps budget, else the
-        // cyclic-Jacobi source; complex tuple typing; BLAS/LAPACK dependency
-        // separation; inferEigh rejections (e.g. complex-symmetric).
-        let failed = (Blade.Tests.LapackTests.runLapackEmissionTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "normalize" ] ->
-        // IR-level F# unit tests for the type normalizer. No Blade source pipeline.
-        let failed = (runNormalizeTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "display-frames" ] ->
-        // Display-frame BYTES + both channels (REPL sentinel line, `ide serve`
-        // display array). Drives the interpreter and the session engine
-        // directly -- no g++, no editor.
-        let failed = (Blade.Tests.Display.runDisplayTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "gr-render" ] ->
-        // The GR render lane: renderPlot's frame bytes and argument rules, and
-        // the worker protocol against a fake helper the block writes itself.
-        // No GR needed -- the one case that wants a real gr-render skips.
-        let failed = (Blade.Tests.GrRender.runGrRenderTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "unify" ] ->
-        // TypeCheck-level F# unit tests for the unify fast path: constructs
-        // IRType values directly and calls unify. No Blade source pipeline.
-        let failed = (runUnifyTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "validate-arrow" ] ->
-        // IR-level F# unit tests for the validateArrowShape gate at
-        // mkVirtualArrayArrow entry. No Blade source pipeline.
-        let failed = (runValidateArrowTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "type-structure" ] ->
-        // Type-level structural assertions on lowered Blade source: deduced IR
-        // type (rank, per-group arity+symmetry, elem type) via matchesTypePattern. No codegen/run.
-        let failed = (Blade.Tests.TypeStructure.runTypeStructureTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "attrs" ] ->
-        // IR-level F# unit tests for the exprAttrs bottom-up attribute
-        // computation. No Blade source pipeline.
-        let failed = (runAttrsTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "subst" ] ->
-        // F# unit tests for the contains-substitution mechanism in exprToCpp:
-        // renders IR fragments with populated and empty SubstMaps. No Blade source pipeline.
-        let failed = (runCodeGenSubstTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "shape" ] ->
-        // F# unit tests for the canonical ExprShape traversal:
-        // childrenOf/rebuildWith round-trips, mapIRExpr identity, and
-        // collectVarRefsIR completeness. No Blade source pipeline.
-        let failed = (Blade.Tests.Shape.runShapeTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "diff-oracle" ] ->
-        // Differential gate: this binary vs the pinned ./oracle build over
-        // the dense corpus slice -- identical printed VALUES required.
-        let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" Blade.Tests.DiffOracle.denseSlice).Failed
-        if failed = 0 then 0 else 1
-    // The differential lanes that take a LITERAL tests/corpus/<dir> name:
-    // a name that is no such directory is a usage error, reported as one --
-    // it used to escape as an exception from the corpus loader and surface as
-    // BL9001, an "internal compiler error" for a typo.
-    | [ ("diff-oracle" | "interp" | "opt-diff" | "optdiff" | "opt-diff-licensed" | "llvm") as lane; cat ]
-            when not (corpusCategoryExists lane cat) ->
+    | UnknownLaneCategory (lane, cat) ->
         let known =
             try Blade.Tests.Corpus.singleFileCategories () |> String.concat ", "
             with ex -> $"(the corpus itself was not found: {ex.Message})"
         eprintfn "error: unknown corpus category '%s' for `test %s` -- it takes a directory name under tests/corpus: %s" cat lane known
         1
-    | [ "diff-oracle"; cat ] ->
-        // Single corpus category against the pinned oracle.
-        let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" [cat]).Failed
-        if failed = 0 then 0 else 1
-    | [ "opt-diff" ] | [ "optdiff" ] ->
-        // Optimizer differential: every corpus program (single-file
-        // categories + multifile) with every Blade.Optimize gate OFF vs ON.
-        // Emission-only for programs the optimizer leaves untouched; the
-        // rest are compiled and run both ways (needs g++). Standalone only.
-        let failed = (Blade.Tests.OptDiff.runOptDiffTests (Blade.Tests.Corpus.singleFileCategories ()) true).Failed
-        if failed = 0 then 0 else 1
-    | [ ("opt-diff" | "optdiff"); cat ] ->
-        // One corpus category (the LITERAL tests/corpus/<dir> name).
-        let failed =
-            if cat = "multifile" then (Blade.Tests.OptDiff.runOptDiffTests [] true).Failed
-            else (Blade.Tests.OptDiff.runOptDiffTests [ cat ] false).Failed
-        if failed = 0 then 0 else 1
-    | [ "opt-diff-licensed" ] ->
-        // The optimizer differential under the DEFAULT floating-point policy
-        // (licensed folds, contraction on), compared with the `test llvm`
-        // token rule (tests/OptDiff.fs runOptDiffTestsWith). Standalone only;
-        // the `opt-diff` lane's own time is unchanged.
-        let failed = (Blade.Tests.OptDiff.runOptDiffTestsWith true (Blade.Tests.Corpus.singleFileCategories ()) true).Failed
-        if failed = 0 then 0 else 1
-    | [ "opt-diff-licensed"; cat ] ->
-        let failed =
-            if cat = "multifile" then (Blade.Tests.OptDiff.runOptDiffTestsWith true [] true).Failed
-            else (Blade.Tests.OptDiff.runOptDiffTestsWith true [ cat ] false).Failed
-        if failed = 0 then 0 else 1
-    | [ "interp" ] ->
-        // Interpreter differential gate: tree-walking IR interpreter vs the
-        // compiled binary over the supported corpus slice -- byte-identical normalized stdout required.
-        let failed = (Blade.Tests.InterpDiff.runInterpDiffTests (Blade.Tests.InterpDiff.currentSlice ())).Failed
-        if failed = 0 then 0 else 1
-    | [ "interp"; cat ] ->
-        // Single corpus category through the interpreter differential gate.
-        let failed = (Blade.Tests.InterpDiff.runInterpDiffTests [cat]).Failed
-        if failed = 0 then 0 else 1
-    | [ "spans" ] ->
-        // Error-location tests: deliberately broken sources, asserting the reported line. No C++ pipeline.
-        let failed = (Blade.Tests.Spans.runSpanTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "diagnostics" ] ->
-        // Diagnostics core (renderer + registry) and the diagnostics corpus
-        // (broken sources with pinned codes/spans). No C++ pipeline.
-        let core = (Blade.Tests.DiagnosticsCore.runDiagnosticsCoreTests ()).Failed
-        let corpus = (Blade.Tests.DiagCorpus.runDiagCorpusTests ()).Failed
-        // BL4011 suggestions: pinned (and pinned-ABSENT) over the ml-equiv corpus.
-        let certSuggest = (Blade.Tests.DiagCorpus.runCertSuggestTests ()).Failed
-        if core + corpus + certSuggest = 0 then 0 else 1
-    | [ "rep-differential" ] | [ "repdifferential" ] ->
-        // Deduction parity gate: the typed rep-status deduction vs the seam
-        // inference, proposal by proposal over the ml-equiv corpus. In-process, no C++ pipeline; also part of the full suite.
-        let failed = (Blade.Tests.RepDifferential.runRepDifferentialTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "rep-check" ] | [ "repcheck" ] ->
-        // Declared-certificate agreement gate: the typed walker's SECOND
-        // OPINION on every certificate the elaboration seam already checked.
-        // Zero disagreements over the ml-equiv corpus (else a compiler bug).
-        let failed = (Blade.Tests.RepCheckAgreement.runRepCheckAgreementTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "rep-reject" ] | [ "repreject" ] ->
-        // Rejection-parity census: the only gate that looks at REFUSED
-        // programs. For every ml-equiv reject-probe, measures what the typed
-        // walker would say by shadowing the `ml.equiv` pin so it reaches typecheck.
-        let failed = (Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "oracles" ] ->
-        // Differential-harness oracles checked against hand-computed / analytic values.
-        let failed = (Blade.Tests.OracleReview.runOracleTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "orbrank" ] | [ "orb-rank" ] ->
-        // OrbIdx cardinality fold, canonicalizer, segment-peeled traversal
-        // stream, and rank/unrank pair (src/OrbRank.fs), pinned against
-        // brute-force canonicalization as SET and ORDER (a read->write roundtrip can't catch an order mismatch).
-        let failed = (Blade.Tests.OrbRankReview.runOrbRankTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "treerank" ] | [ "tree-rank" ] ->
-        // TreeIdx shape validation, the derived preorder tables, and the
-        // path <-> leaf-offset pair (src/TreeRank.fs), pinned against a
-        // brute-force recursion over an independent nested-shape ADT as SET and ORDER, plus subtree contiguity.
-        let failed = (Blade.Tests.TreeRankReview.runTreeRankTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "sympower" ] | [ "sympower-tables" ] ->
-        // T_{j,l} Sym-power occurrence tables (SymPowerTables.fs): exact
-        // rational kernel/Gram pins, the realization phase rule, realCG completeness.
-        let failed = (Blade.Tests.SymPowerTablesReview.runSymPowerTablesTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "polyoracle" ] | [ "poly-oracle" ] ->
-        // Sym^k label basis checked against isotypic projectors from an
-        // independent Casimir-Lagrange route (exact integer/rational).
-        let failed = (Blade.Tests.PolyOracleReview.runPolyOracleTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "lietables" ] | [ "lie-tables" ] ->
-        // Exact so(3) generator tables and the radical-vector Lie discharger
-        // (MLLieDischarge.fs): assemble/exponentiate each table, compare
-        // against the real Wigner action fit from solid harmonics, plus exact
-        // algebra (skew-symmetry, brackets, Casimir) and negative controls.
-        let failed = (Blade.Tests.LieTablesReview.runLieTablesTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "permspec" ] | [ "perm-spec" ] ->
-        // Sn permutation-module counting layer (MLPermSpec.fs): RGS partition
-        // enumeration vs the Stirling recurrence and an independent
-        // enumerator, witness-unitriangularity, perm_weight/bias_dim sizing.
-        let failed = (Blade.Tests.PermSpecReview.runPermSpecTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "permoracle" ] | [ "perm-oracle" ] ->
-        // Coarsening-indicator basis checked for COMPLETENESS against the
-        // exact rational Reynolds projector over Q; Gram closed form from an
-        // independent union-find join. BigInteger fractions, no float/tolerance.
-        let failed = (Blade.Tests.PermOracleReview.runPermOracleTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "structidx" ] | [ "struct-idx" ] ->
-        // Constrained-record COUNTING layer (StructIdxSpec.fs): box
-        // enumeration over per-field INCLUSIVE bounds with a two-route
-        // certificate (flat filter vs arrow-style heads filter, set AND
-        // order), the CGm112 anchor sweep, idx_card(R) via resolveStatics.
-        let failed = (Blade.Tests.StructIdxSpecReview.runStructIdxSpecTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "structidxoracle" ] | [ "struct-idx-oracle" ] ->
-        // Independently coded recursive per-field enumerator over the same
-        // solution sets, compared against StructIdxSpec.enumerateBox as SET and ORDER.
-        let failed = (Blade.Tests.StructIdxOracle.runStructIdxOracleTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "pgspec" ] | [ "pg-spec" ] ->
-        // Point-group counting layer (MLPointSpec.fs): frozen {C4, D4} tables
-        // and their integrity certificate (closure vs declared order,
-        // orthogonality, FS indicators, R-Burnside trap sum), 9-vs-5 FS
-        // contrast, generic e-weighted core vs MLSpec.homDim/homBlocks (15-spec sweep).
-        let failed = (Blade.Tests.PointSpecReview.runPointSpecTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "pgoracle" ] | [ "pg-oracle" ] ->
-        // Emitted point-group Hom basis checked for COMPLETENESS against the
-        // exact rational Reynolds projector over Q, Gram closed form d*I_e
-        // per cell, three negative controls. BigInteger fractions throughout.
-        let failed = (Blade.Tests.PgOracleReview.runPgOracleTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "alloc" ] ->
-        // Standalone C++ runtime-layout tests for the contiguous-backing
-        // allocate<>: contiguity/cardinality invariants value-checking Blade tests cannot catch.
-        let failed = (Blade.Tests.AllocTests.runAllocLayoutTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "orbwreath" ] | [ "orb-wreath" ] ->
-        // Standalone C++ wreath-class storage tests: segment-peeled traversal
-        // order, cardinality fold, rank/unrank bijection, canon signs, overflow walls.
-        let failed = (Blade.Tests.OrbWreathTests.runOrbWreathTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "omp-pragma" ] ->
-        // Codegen-string checks: `where omp(...)` reaches C++ as a pragma for
-        // every kernel spelling, none for unannotated ones. No toolchain needed.
-        let failed = (Blade.Tests.OmpTests.runOmpPragmaTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "omp-reduce" ] ->
-        // Comm-licensed parallel reductions: compile omp and serial spellings
-        // of the same fold, diff values; Path-B determinism, collapse(2) gates. Needs g++.
-        let failed = (Blade.Tests.OmpTests.runOmpReduceTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "omp-coverage" ] ->
-        // OpenMP thread-coverage: generate loop programs with codegen
-        // test-mode instrumentation, compile -fopenmp, run with forced
-        // threads, verify emitted pragmas form genuine parallel regions.
-        let failed = (Blade.Tests.OmpTests.runOmpCoverageTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "cli" ] ->
-        // CLI smoke: compile+run a one-line .edgi via the user-facing compileToExe path.
-        let failed = (runCliSmokeTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "cuda" ] ->
-        // CUDA kernel block (differential vs host-loop oracle) plus cuBLAS
-        // swap-table verification. Skips without nvcc/GPU; on Windows run from x64 Native Tools prompt.
-        // The toolchain-free buffer/emission checks ride along (they also run
-        // in the full suite), so a targeted `test cuda` reaches them.
-        let failed =
-            (Blade.Tests.CudaTests.runBufferTypeTests ()).Failed
-            + (Blade.Tests.CudaTests.runCudaTests ()).Failed
-            + (Blade.Tests.CudaTests.runCublasSwapTests ()).Failed
-            + (Blade.Tests.CudaTests.runCublasFailureExitTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "mpi" ] ->
-        // MPI decomposition block (differential vs serial oracle under
-        // mpiexec -n 1/2/4). Skips without g++ / -lmsmpi / mpiexec.
-        let failed = (Blade.Tests.MpiTests.runMpiTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "llvm" ] ->
-        // The BLADE_LLVM lane: byte-pinned .ll emission (no toolchain needed)
-        // plus the llvm-vs-C++ stdout differential over the scalar/functions/
-        // loops corpora. STANDALONE ONLY -- deliberately absent from
-        // isSuiteFlag and from FullSuiteOptions, so no combination of `blade
-        // test` flags can fold it into the default suite: it spawns two native
-        // compilers per corpus file. Skips cleanly without clang or g++.
-        Blade.Tests.LlvmTests.runLlvmTests ()
-    | [ "llvm-bench" ] | [ "llvmbench" ] ->
-        // The two-lane benchmark: codegen speed (IRProgram -> executable, per
-        // lane) and runtime over four non-power-of-two shapes. Standalone for
-        // the same reason `llvm` is, only more so -- it spawns hundreds of
-        // compiler and executable invocations. Never fails on a slow ratio;
-        // fails only on a refusal, a build error or a value disagreement.
-        Blade.Tests.LlvmTests.runLlvmBench ()
-    | [ "llvm"; cat ] ->
-        // The same differential over ONE corpus directory. Like
-        // `test interp <dir>`, this takes the LITERAL tests/corpus/<dir> name
-        // (`blade test llvm index-types`), not a dispatch alias key.
-        Blade.Tests.LlvmTests.runLlvmCategory cat
-    | [ "--llvm-backend" ] | [ "llvm-backend" ] ->
-        // The ordinary suite with the CORPUS driven through the BLADE_LLVM lane
-        // instead of the C++ emitter.
-        //
-        // Distinct from `blade test llvm`, and the distinction is the point.
-        // That is a two-lane DIFFERENTIAL: it needs both compilers, and asks
-        // whether the lanes agree. This runs ONE lane and judges it against the
-        // corpus's own `// EXPECT:` pins -- no g++, one compiler per file, and
-        // an answer about the LLVM lane that does not depend on the C++ lane
-        // being right. Weaker per program (a pin covers only what it names) and
-        // stronger in reach.
-        //
-        // A program the lane refuses SKIPS. It is never handed to the C++
-        // emitter: `blade run`'s fallback is exactly wrong here, because it
-        // would count C++ coverage as the LLVM lane's.
-        match resolveClang () with
-        | None ->
-            eprintfn "test --llvm-backend: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
-            eprintfn "      An error, not a skip: without clang EVERY corpus test would skip and the run would look green."
-            1
-        | Some clang ->
-            printfn "Corpus back end: LLVM (clang: %s)" clang
-            printfn "A program the lane refuses is SKIPPED, never handed to the C++ emitter, so the totals below are this lane's own.\n"
-            setCorpusBackend LlvmBackend
-            try runFullSuite defaultFullSuiteOptions
-            finally setCorpusBackend CppBackend
-    | [ "--llvm-backend"; cat ] | [ cat; "--llvm-backend" ] ->
+    | LaneCategory (lane, cat) ->
+        match lane with
+        | "diff-oracle" ->
+            // Single corpus category against the pinned oracle.
+            let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" [cat]).Failed
+            if failed = 0 then 0 else 1
+        | "opt-diff" | "optdiff" ->
+            // One corpus category (the LITERAL tests/corpus/<dir> name).
+            let failed =
+                if cat = "multifile" then (Blade.Tests.OptDiff.runOptDiffTests [] true).Failed
+                else (Blade.Tests.OptDiff.runOptDiffTests [ cat ] false).Failed
+            if failed = 0 then 0 else 1
+        | "opt-diff-licensed" ->
+            let failed =
+                if cat = "multifile" then (Blade.Tests.OptDiff.runOptDiffTestsWith true [] true).Failed
+                else (Blade.Tests.OptDiff.runOptDiffTestsWith true [ cat ] false).Failed
+            if failed = 0 then 0 else 1
+        | "interp" ->
+            // Single corpus category through the interpreter differential gate.
+            let failed = (Blade.Tests.InterpDiff.runInterpDiffTests [cat]).Failed
+            if failed = 0 then 0 else 1
+        | _ ->
+            // `llvm`: the same differential over ONE corpus directory. Like
+            // `test interp <dir>`, this takes the LITERAL tests/corpus/<dir> name
+            // (`blade test llvm index-types`), not a dispatch alias key.
+            Blade.Tests.LlvmTests.runLlvmCategory cat
+    | LlvmBackendCategory cat ->
         // The same back end over ONE category. This is the form you want while
         // growing the lane -- the whole suite is a long way to find out that a
         // single category still refuses everything -- and the form CI wants,
@@ -6722,65 +6942,10 @@ and internal dispatchTestClean (rest: string list) : int =
             setCorpusBackend LlvmBackend
             try dispatchTestClean [ cat ]
             finally setCorpusBackend CppBackend
-    | [ "--llvm" ] ->
-        // Deliberately NOT a member of isSuiteFlag. Spelling it like one is a
-        // reasonable guess given --omp/--cuda/--mpi, so say why it isn't
-        // instead of letting it fall through to "Unknown test category".
-        eprintfn "test: --llvm is not a full-suite flag -- the llvm lane spawns two native compilers per corpus file, so it is standalone only."
-        eprintfn "      Run 'blade test llvm' (or 'blade test llvm all' for every corpus category,"
-        eprintfn "      'blade test llvm <corpus-dir>' / 'blade test llvm goldens' / 'blade test llvm-bench')."
-        1
-    | [ "timing" ] ->
-        // Differential timing: (r!)^d speedup of comm-annotation and
-        // symmetric-type forms vs dense. Warns (never fails) on a slow ratio.
-        let failed = (Blade.Tests.Benchmarks.runDifferentialTimingTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "netcdf" ] ->
-        // NetCDF provider tests 1-6 run against a mock NcFile. Tests 7-8 need
-        // sample.nc + libnetcdf, else SKIP.
-        Blade.Tests.NetcdfTests.runNetcdfTests ()
-    | [ "zarr" ] ->
-        // Zarr provider tests. Hermetic (fixtures generated on the fly); only
-        // the e2e compile+run blocks need g++ and skip without it.
-        Blade.Tests.ZarrTests.runZarrTests ()
-    | [ "csv" ] ->
-        // CSV provider tests. Fully hermetic; only the e2e compile+run blocks
-        // need g++ and skip without it.
-        Blade.Tests.CsvTests.runCsvTests ()
-    | [ "icechunk" ] ->
-        // Icechunk provider tests. Fully hermetic; fixture repos are generated
-        // on the fly by IcechunkWrite; only the e2e compile+run block needs
-        // g++ and skips without it.
-        Blade.Tests.IcechunkTests.runIcechunkTests ()
-    | [ "print-form" ] | [ "printform" ] ->
-        // The display print form (P3-26, src/PrintForm.fs): emission facts and
-        // the three lanes' display text. Also in the default suite (RunAll.fs
-        // yields `printForm`).
-        let failed = (Blade.Tests.PrintFormTests.runPrintFormTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "run-record" ] | [ "runrecord" ] ->
-        // Input manifests + run records (plan-fortran-killer-2 section 7).
-        // Also in the default suite (RunAll.fs yields `runRecord`).
-        let failed = (Blade.Tests.RunRecordTests.runRunRecordTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "provider-desugar" ] | [ "providerdesugar" ] ->
-        // The icechunk checkout desugar (src/ProviderDesugar.fs). Pure
-        // in-process AST rewrite; no toolchain, no fixtures, never skips.
-        // Also in the default suite (RunAll.fs yields `providerDesugar`),
-        // unlike the store-backed provider lanes.
-        Blade.Tests.ProviderDesugarTests.runProviderDesugarTests ()
-    | [ "hybrid" ] ->
-        // Mixed-parallelism tests: order-table parse + gate-off degradation
-        // run always; mpi+omp differentials need mpiexec and skip without it.
-        Blade.Tests.HybridTests.runHybridTests ()
-    | [ cat ] ->
-        // Test a specific category: blade test basic, blade test loops, etc.
-        let categoryTests = resolveCategoryKey cat
-        match categoryTests with
-        | Some (name, tests) ->
-            let r = runTestCategoryFull name tests "./generated_cpp_tests"
-            if r.Failed = 0 then 0 else 1
-        | None -> eprintfn "Unknown test category: %s" cat; 1
-    | _ -> usageFailure ($"""unrecognized test invocation: test {(String.concat " " rest)}""")
+    | Category (name, tests) ->
+        let r = runTestCategoryFull name tests "./generated_cpp_tests"
+        if r.Failed = 0 then 0 else 1
+    | UnknownCategory cat -> eprintfn "Unknown test category: %s" cat; 1
+    | Unrecognized -> usageFailure ($"""unrecognized test invocation: test {(String.concat " " rest)}""")
 
 /// Top-level command dispatch.

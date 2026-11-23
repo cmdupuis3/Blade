@@ -9,7 +9,7 @@
 //      The new reader must give the same row. Each row runs with
 //      BLADE_TOOLCHAIN_FILE pointed at a private temp file (holding the row's
 //      file keys, or absent), so no ambient toolchain file can leak in.
-//   2. THE REGISTRY AGAINST ITS WITNESSES: CLAUDE.md's knob table and mentions,
+//   2. THE REGISTRY AGAINST ITS WITNESSES: the hand-written notes (docs/reference/knob-notes.md),
 //      `Optimize.optimizerGates` / `optimizerGateMirrors`, the suite's cleared
 //      and pinned lists, and `Setup.persistedToolchainKeys`.
 //   3. NO RAW READ LEFT in the converted files.
@@ -17,7 +17,7 @@
 //      regenerates it).
 //
 // The default suite runs everything but the PrintForm rows as "Knobs Sync"
-// (`runKnobsSyncTests`), so a knob added to CLAUDE.md or to optimizerGates
+// (`runKnobsSyncTests`), so a knob added to the notes or to optimizerGates
 // without its registry entry fails the suite. The PrintForm rows read or record
 // PrintForm's process state (`describe` / `applyCliDefault`), so they run only
 // under the standalone `blade test knobs`, last.
@@ -680,7 +680,7 @@ let renderReference () : string =
           + $"{Knobs.all.Length} in all, grouped by kind. `blade test` is what the suite does with the knob for its run "
           + "(cleared, pinned to a value, or left alone); `toolchain` says whether `blade.toolchain.json` is read when the "
           + "variable is unset (`file`) and whether bare `blade setup` persists it (`persisted`). A knob marked "
-          + "*not in CLAUDE.md* is one the project guide does not mention yet.")
+          + "*no notes* has no row in the hand-written notes, `docs/reference/knob-notes.md`.")
     for kind in kindOrder do
         let ks = Knobs.all |> List.filter (fun k -> k.Kind = kind)
         if not ks.IsEmpty then
@@ -709,7 +709,7 @@ let renderReference () : string =
                     | Knobs.EnvOnly -> "env only"
                     | Knobs.FileFallback -> "file"
                     | Knobs.Persisted -> "file, persisted"
-                let text = if k.Documented then k.Text else k.Text + " *Not in CLAUDE.md.*"
+                let text = if k.Documented then k.Text else k.Text + " *No notes.*"
                 line ("| `" + k.Name + "` | " + kindName k.Kind + " | " + cell k.Default + " | " + cell values + " | "
                       + readers + " | " + suite + " | " + tc + " | " + cell text + " |")
     sb.ToString()
@@ -723,11 +723,11 @@ let private convertedFiles =
     [ "src/Knobs.fs"; "src/Toolchain.fs"; "src/Build.fs"; "src/PrintForm.fs"; "src/Doctor.fs"; "src/Setup.fs"
       "src/Grad.fs"; "src/display/GrRender.fs" ]
 
-/// The BLADE_* names in the first column of CLAUDE.md's knob table (the
-/// "Environment variables" section), plus its non-BLADE rows.
-let private claudeTableNames (claude: string) : string list =
-    let lines = claude.Replace("\r\n", "\n").Split('\n')
-    let start = lines |> Array.tryFindIndex (fun l -> l.StartsWith "## Environment variables")
+/// The BLADE_* names in the first column of the notes table (docs/reference/knob-notes.md, its
+/// "Notes by knob" section), plus its non-BLADE rows.
+let private notesTableNames (notes: string) : string list =
+    let lines = notes.Replace("\r\n", "\n").Split('\n')
+    let start = lines |> Array.tryFindIndex (fun l -> l.StartsWith "## Notes by knob")
     match start with
     | None -> []
     | Some s ->
@@ -852,24 +852,24 @@ let private runChecks (blockName: string) (stateful: bool) (suiteCleared: string
 
     match root with
     | None ->
-        resultLine Skip "registry vs CLAUDE.md, raw reads, docs/reference/knobs.md" "no repository root (docs/formalism.md + CLAUDE.md) above the working directory or the binary"
+        resultLine Skip "registry vs docs/reference/knob-notes.md, raw reads, docs/reference/knobs.md" "no repository root (docs/formalism.md + CLAUDE.md) above the working directory or the binary"
     | Some r ->
-        let claude = File.ReadAllText(Path.Combine(r, "CLAUDE.md"))
-        let inClaude (name: string) = Regex.IsMatch(claude, "(?<![A-Z0-9_])" + Regex.Escape name + "(?![A-Z0-9_])")
+        let notes = File.ReadAllText(Path.Combine(r, "docs", "reference", "knob-notes.md"))
+        let inNotes (name: string) = Regex.IsMatch(notes, "(?<![A-Z0-9_])" + Regex.Escape name + "(?![A-Z0-9_])")
         let wrongDoc =
-            Knobs.all |> List.filter (fun k -> inClaude k.Name <> k.Documented)
+            Knobs.all |> List.filter (fun k -> inNotes k.Name <> k.Documented)
             |> List.map (fun k ->
-                if k.Documented then $"{k.Name} is marked Documented in src/Knobs.fs but CLAUDE.md does not name it (set Documented = false)"
-                else $"{k.Name} is named in CLAUDE.md but marked Documented = false in src/Knobs.fs (set it true)")
-        check "registry: Documented = named in CLAUDE.md" wrongDoc.IsEmpty
+                if k.Documented then $"{k.Name} is marked Documented in src/Knobs.fs but docs/reference/knob-notes.md does not name it (set Documented = false)"
+                else $"{k.Name} is named in docs/reference/knob-notes.md but marked Documented = false in src/Knobs.fs (set it true)")
+        check "registry: Documented = named in docs/reference/knob-notes.md" wrongDoc.IsEmpty
             (if wrongDoc.IsEmpty then "" else String.concat "; " wrongDoc + "; " + regen)
-        let tableNames = claudeTableNames claude
+        let tableNames = notesTableNames notes
         let notInRegistry = tableNames |> List.filter (fun n -> (Knobs.tryFind n).IsNone)
-        check "CLAUDE.md knob table: every row's knob is in the registry"
+        check "knob-notes.md table: every row's knob is in the registry"
             (not tableNames.IsEmpty && notInRegistry.IsEmpty)
-            (if tableNames.IsEmpty then "no knob table found under CLAUDE.md's `## Environment variables` heading"
+            (if tableNames.IsEmpty then "no knob table found under the `## Notes by knob` heading of docs/reference/knob-notes.md"
              elif notInRegistry.IsEmpty then $"{tableNames.Length} names"
-             else $"""in CLAUDE.md's knob table but not in src/Knobs.fs: {String.concat ", " notInRegistry} -- add an entry to src/Knobs.fs (and to `all`), {regen}""")
+             else $"""in the knob-notes.md table but not in src/Knobs.fs: {String.concat ", " notInRegistry} -- add an entry to src/Knobs.fs (and to `all`), {regen}""")
 
         // ---- 3. no raw read of a registered knob in the converted files ----
         let rawRead =
@@ -905,7 +905,7 @@ let private runChecks (blockName: string) (stateful: bool) (suiteCleared: string
     { Block = blockName; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 /// The default suite's block: every check that holds no process state -- the
-/// registry against CLAUDE.md and the hand-kept lists, the literal-read check,
+/// registry against the hand-written notes and the hand-kept lists, the literal-read check,
 /// the generated page, and the old-versus-new tables except PrintForm's.
 let runKnobsSyncTests (suiteCleared: string list) (suitePinned: (string * string) list) : BlockResult =
     runChecks "Knobs Sync" false suiteCleared suitePinned []

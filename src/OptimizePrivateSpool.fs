@@ -4,6 +4,7 @@ module Blade.OptimizePrivateSpool
 open Blade.Types
 open Blade.IR
 open Blade.Optimize
+open Blade.OptimizeStorage
 
 type Plan = {
     Module: IRModule

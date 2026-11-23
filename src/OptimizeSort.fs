@@ -261,7 +261,7 @@ let planSortTerminal (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (s
     let resolve (k: IRExpr) = match k with IRVar (fid, _) -> Map.tryFind fid funcs | _ -> None
     let writes = Blade.Optimize.scheduleMayWriteIn programFuncs modul
     let allCallables = (modul.Functions @ programFuncs) |> List.distinctBy (fun f -> f.Id)
-    let deferred = Blade.Optimize.programDeferredId modul allCallables Seq.empty
+    let deferred = Blade.OptimizeAnalysis.programDeferredId modul allCallables Seq.empty
     let arr = List.toArray modul.Bindings
     let indexOf (id: IRId) = arr |> Array.tryFindIndex (fun b -> b.Id = id)
     let printSelection =
@@ -299,7 +299,7 @@ let planSortTerminal (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (s
                          (match at.IndexTypes.Head.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)
                      | _ -> None)
                 | _ -> None
-            let found = Blade.Optimize.referenceCensus allCallables modul sb.Id sb.Name
+            let found = Blade.OptimizeStorage.referenceCensus allCallables modul sb.Id sb.Name
             let decision : Result<IRBinding * IRCallable * IRExpr option * string list, string> =
                 match literalExtent with
                 | None -> Error "the operand's extent is not a literal (a plain range with literal bounds or a stored rank-1 array of literal extent; a dynamic bound is evaluated again by the output's extents table)"

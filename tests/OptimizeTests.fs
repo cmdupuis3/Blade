@@ -1358,12 +1358,12 @@ let private recFoldConstructorTableCases () : bool list =
         for (key, owner, case, i, ft) in members do
             match Map.tryFind key channelOf with
             | None -> ()
-            | Some Optimize.ChContainer -> ()
+            | Some Optimize.RecFoldChannel.ChContainer -> ()
             | Some ch ->
             match rfLeaf ft with
             | None ->
                 (match ch with
-                 | Optimize.ChInert | Optimize.ChBinder | Optimize.ChParam | Optimize.ChAdmitted -> ()
+                 | Optimize.RecFoldChannel.ChInert | Optimize.RecFoldChannel.ChBinder | Optimize.RecFoldChannel.ChParam | Optimize.RecFoldChannel.ChAdmitted -> ()
                  | _ -> bad.Add $"{key}: {ch} but the member cannot carry the sentinel")
             | Some leaf ->
             let value =
@@ -1379,17 +1379,17 @@ let private recFoldConstructorTableCases () : bool list =
             match rfObserve owner value with
             | None ->
                 (match ch with
-                 | Optimize.ChInert -> ()
+                 | Optimize.RecFoldChannel.ChInert -> ()
                  | _ -> bad.Add $"{key}: {ch} on an owner no walker roots")
             | Some (child, inType, foreign) ->
                 checkedN <- checkedN + 1
                 let ok =
                     match ch with
-                    | Optimize.ChRef | Optimize.ChChild -> child
-                    | Optimize.ChType -> inType && not child
-                    | Optimize.ChCallable | Optimize.ChModule -> foreign
-                    | Optimize.ChBinder | Optimize.ChParam | Optimize.ChInert | Optimize.ChAdmitted -> not child && not inType && not foreign
-                    | Optimize.ChContainer -> true
+                    | Optimize.RecFoldChannel.ChRef | Optimize.RecFoldChannel.ChChild -> child
+                    | Optimize.RecFoldChannel.ChType -> inType && not child
+                    | Optimize.RecFoldChannel.ChCallable | Optimize.RecFoldChannel.ChModule -> foreign
+                    | Optimize.RecFoldChannel.ChBinder | Optimize.RecFoldChannel.ChParam | Optimize.RecFoldChannel.ChInert | Optimize.RecFoldChannel.ChAdmitted -> not child && not inType && not foreign
+                    | Optimize.RecFoldChannel.ChContainer -> true
                 if not ok then bad.Add $"{key}: {ch} but child={child} type={inType} foreign={foreign}"
         if bad.Count = 0 then resultLine Pass name $"{checkedN} rows checked against their walker"; true
         else resultLine Fail name (String.concat "; " bad); false

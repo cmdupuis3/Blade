@@ -119,7 +119,7 @@ let private scheduleModule (builder: IRBuilder) (modules: IRModule list) (modul:
             for payload in Blade.Optimize.bindingSideOperands m id do declarations payload
     for root in roots do
         match root with
-        | Blade.Optimize.RootType (_, ty) -> for extent in Blade.Optimize.irTypeExtentExprs ty do declarations extent
+        | Blade.Optimize.CompactionRoot.RootType (_, ty) -> for extent in Blade.Optimize.irTypeExtentExprs ty do declarations extent
         | _ -> ()
     for f in funcs |> Map.toSeq |> Seq.map snd do
         used.Add f.Id |> ignore
@@ -197,13 +197,13 @@ let private scheduleModule (builder: IRBuilder) (modules: IRModule list) (modul:
                      not (ids |> Set.exists (fun a -> ids |> Set.exists (fun b -> (Blade.Optimize.OrbitPullTable.tryAudit a b).IsSome)))) "another planner owns this body"
             let retained =
                 (roots |> List.exists (function
-                    | Blade.Optimize.RootFunctionBody k when k.Id = f.Id -> false
-                    | Blade.Optimize.RootFunctionBody k -> exprReads pool k.Body || (k.Captures |> List.exists (fun c -> c.Id = pool || typeReads pool c.Type))
-                    | Blade.Optimize.RootBindingValue b -> exprReads pool b.Value
-                    | Blade.Optimize.RootSideOperand (_, _, e) -> exprReads pool e
-                    | Blade.Optimize.RootType (_, ty) -> typeReads pool ty
-                    | Blade.Optimize.RootSourceRef (_, id) -> id = pool
-                    | Blade.Optimize.RootNameRef _ -> true))
+                    | Blade.Optimize.CompactionRoot.RootFunctionBody k when k.Id = f.Id -> false
+                    | Blade.Optimize.CompactionRoot.RootFunctionBody k -> exprReads pool k.Body || (k.Captures |> List.exists (fun c -> c.Id = pool || typeReads pool c.Type))
+                    | Blade.Optimize.CompactionRoot.RootBindingValue b -> exprReads pool b.Value
+                    | Blade.Optimize.CompactionRoot.RootSideOperand (_, _, e) -> exprReads pool e
+                    | Blade.Optimize.CompactionRoot.RootType (_, ty) -> typeReads pool ty
+                    | Blade.Optimize.CompactionRoot.RootSourceRef (_, id) -> id = pool
+                    | Blade.Optimize.CompactionRoot.RootNameRef _ -> true))
             require (not retained) "pool retained by a capture/type/side payload or foreign reference"
             // Statement events cannot be installed in a function subsequently
             // rendered as an expression/kernel value. Only ordinary direct
@@ -215,12 +215,12 @@ let private scheduleModule (builder: IRBuilder) (modules: IRModule list) (modul:
                 | ExprShape (children, _) -> children |> List.forall directCallsOnly
             let valueUse =
                 (roots |> List.exists (function
-                    | Blade.Optimize.RootFunctionBody k -> not (directCallsOnly k.Body)
-                    | Blade.Optimize.RootBindingValue b -> not (directCallsOnly b.Value)
-                    | Blade.Optimize.RootSideOperand (_, _, e) -> not (directCallsOnly e)
-                    | Blade.Optimize.RootType (_, ty) -> typeReads f.Id ty
-                    | Blade.Optimize.RootSourceRef (_, id) -> id = f.Id
-                    | Blade.Optimize.RootNameRef _ -> true))
+                    | Blade.Optimize.CompactionRoot.RootFunctionBody k -> not (directCallsOnly k.Body)
+                    | Blade.Optimize.CompactionRoot.RootBindingValue b -> not (directCallsOnly b.Value)
+                    | Blade.Optimize.CompactionRoot.RootSideOperand (_, _, e) -> not (directCallsOnly e)
+                    | Blade.Optimize.CompactionRoot.RootType (_, ty) -> typeReads f.Id ty
+                    | Blade.Optimize.CompactionRoot.RootSourceRef (_, id) -> id = f.Id
+                    | Blade.Optimize.CompactionRoot.RootNameRef _ -> true))
             require (not valueUse) "function has an expression/kernel use without a statement lifetime proof"
             let formal (ty: IRType) (info: ApplyInfo) : IRId option =
                 match info.Arrays with

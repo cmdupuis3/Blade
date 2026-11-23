@@ -3,7 +3,7 @@
 GENERATED from the registry in `src/Knobs.fs` by `blade test knobs --write`; do not edit by hand.
 `blade test knobs` fails when this page and the registry disagree.
 
-Every environment variable the compiler, the programs it compiles and the test harness read, 113 in all, grouped by kind. `blade test` is what the suite does with the knob for its run (cleared, pinned to a value, or left alone); `toolchain` says whether `blade.toolchain.json` is read when the variable is unset (`file`) and whether bare `blade setup` persists it (`persisted`). A knob marked *not in CLAUDE.md* is one the project guide does not mention yet.
+Every environment variable the compiler, the programs it compiles and the test harness read, 113 in all, grouped by kind. `blade test` is what the suite does with the knob for its run (cleared, pinned to a value, or left alone); `toolchain` says whether `blade.toolchain.json` is read when the variable is unset (`file`) and whether bare `blade setup` persists it (`persisted`). A knob marked *no notes* has no row in the hand-written notes, `docs/reference/knob-notes.md`.
 
 ## Policies
 
@@ -23,7 +23,7 @@ Every environment variable the compiler, the programs it compiles and the test h
 | `BLADE_POOL_RETAIN` | policy | default: 32 MB blocks / 64 MB budget | `default` the default; `0` / `off` / `false` the pre-wave-6 limits, 4 MB / 8 MB; `1` / `on` / `true` the probe arm, 64 MB / 96 MB; `<maxMB>:<budgetMB>` an explicit pair, 0 < max <= budget <= 1048576; `<other>` the default, with a warning | compiler | cleared, pinned `default` | file, persisted | The runtime allocator's pool-retention policy: the largest retained block and the retained-bytes budget. |
 | `BLADE_PRIVATE_SPOOL` | policy | no grant | `root=<dir>,mem=<size>,disk=<size>[,resident=<size>]` the grant: scratch root, memory, disk and resident budgets; `0` / `off` / `false` no grant; `<other>` a hard failure of the verb | compiler | cleared | env only | The private statistical-barrier spool grant (root, memory and disk budgets); environment only, never persisted. |
 | `BLADE_LLVM` | policy | off | `1` / `on` run / compile / emit try the direct LLVM back end first, falling back to C++ | compiler | cleared | env only | Tries the direct LLVM back end first for run / compile / emit, falling back to the C++ lane when it declines. |
-| `BLADE_SHAPE_SPEC_CAP` | policy | 4 | `<n>` at most n shape specializations per function (1..64); 0, negative or above 64 clamp to 64 | compiler | cleared | env only | The cap on shape specializations per function (default 4); the termination backstop of the worklist. *Not in CLAUDE.md.* |
+| `BLADE_SHAPE_SPEC_CAP` | policy | 4 | `<n>` at most n shape specializations per function (1..64); 0, negative or above 64 clamp to 64 | compiler | cleared | env only | The cap on shape specializations per function (default 4); the termination backstop of the worklist. *No notes.* |
 
 ## Print selection and form
 
@@ -104,8 +104,8 @@ Every environment variable the compiler, the programs it compiles and the test h
 | `BLADE_ORBIT_PULL` | A/B arm | on | `1` / `on` on (the default); `0` / `off` the previous form, for A/B | compiler | cleared | env only | The row-owned pull form of the rank-3 ordered orbit scatter on a thread team, in strict threaded builds. |
 | `BLADE_JOIN_THREADS` | A/B arm | on | `1` / `on` on (the default); `0` / `off` the previous form, for A/B | compiler | cleared | env only | The threaded reduction join: an explicitly requested, fully licensed `<&!>` join opens one Path B team. |
 | `BLADE_OWNED_MOVE` | A/B arm | on | `1` / `on` on (the default); `0` / `off` the previous form, for A/B | compiler | cleared | env only | The owned move: a whole-array reassignment of an owning binding frees its previous pool and takes the new one. |
-| `BLADE_LLVM_BRICKS` | A/B arm | auto: the derived policy | `on` / `auto` / `1` the derived policy; `off` / `0` / `none` no bricks; `<B>` a fixed tile edge B | compiler | cleared | env only | The LLVM lane's brick (tile edge) policy: derived, off, or a fixed edge. *Not in CLAUDE.md.* |
-| `BLADE_LLVM_FACTS` | A/B arm | every fact class emits | `off` / `0` / `none` no class emits; `<class>:off` that class does not emit | compiler | cleared | env only | A bisection knob of the LLVM lane: which classes of emitted facts (fast-math flags, ...) are on. *Not in CLAUDE.md.* |
+| `BLADE_LLVM_BRICKS` | A/B arm | auto: the derived policy | `on` / `auto` / `1` the derived policy; `off` / `0` / `none` no bricks; `<B>` a fixed tile edge B | compiler | cleared | env only | The LLVM lane's brick (tile edge) policy: derived, off, or a fixed edge. *No notes.* |
+| `BLADE_LLVM_FACTS` | A/B arm | every fact class emits | `off` / `0` / `none` no class emits; `<class>:off` that class does not emit | compiler | cleared | env only | A bisection knob of the LLVM lane: which classes of emitted facts (fast-math flags, ...) are on. *No notes.* |
 
 ## Instrumentation
 
@@ -119,10 +119,10 @@ Every environment variable the compiler, the programs it compiles and the test h
 | `BLADE_PERF_COUNTERS` | instrumentation | off | `1` [perf] counters on stderr | compiler | left alone | env only | Compiler self-profiling: [perf] counters on stderr. |
 | `BLADE_PHASE_TIMING` | instrumentation | off | `1` [phase] timings on stderr | compiler | left alone | env only | Compiler self-profiling: [phase] timings on stderr. |
 | `BLADE_MEMBER_VERBOSE` | instrumentation | off | `1` a [member] line per membership build on stderr | compiled program | cleared | env only | A run-time report of each membership build ([member] lines on stderr); changes no emission. |
-| `BLADE_LLVM_DUMP_IR` | instrumentation | off | `1` dump the emitted LLVM IR | compiler | left alone | env only | Dumps the LLVM lane's emitted IR. *Not in CLAUDE.md.* |
-| `BLADE_DEBUG_SHAPE_SPEC` | instrumentation | off | `<anything but 0>` print the per-module specialize / cap / decline census | compiler | left alone | env only | Prints the per-module shape specialize / cap / decline census. *Not in CLAUDE.md.* |
-| `BLADE_GRAD_DUMP` | instrumentation | off | `<anything but 0>` print each synthesized ad.grad / vjp / jvp declaration on stderr | compiler | left alone | env only | Prints each synthesized ad.grad / ad.vjp / ad.jvp declaration (F# structural form) on stderr. *Not in CLAUDE.md.* |
-| `BLADE_EXE_CACHE_VERBOSE` | instrumentation | off | `1` / `on` [cache] hit / store tracing on stderr | compiler | left alone | env only | Traces executable-cache hits and stores on stderr; `blade run --verbose` sets it. *Not in CLAUDE.md.* |
+| `BLADE_LLVM_DUMP_IR` | instrumentation | off | `1` dump the emitted LLVM IR | compiler | left alone | env only | Dumps the LLVM lane's emitted IR. *No notes.* |
+| `BLADE_DEBUG_SHAPE_SPEC` | instrumentation | off | `<anything but 0>` print the per-module specialize / cap / decline census | compiler | left alone | env only | Prints the per-module shape specialize / cap / decline census. *No notes.* |
+| `BLADE_GRAD_DUMP` | instrumentation | off | `<anything but 0>` print each synthesized ad.grad / vjp / jvp declaration on stderr | compiler | left alone | env only | Prints each synthesized ad.grad / ad.vjp / ad.jvp declaration (F# structural form) on stderr. *No notes.* |
+| `BLADE_EXE_CACHE_VERBOSE` | instrumentation | off | `1` / `on` [cache] hit / store tracing on stderr | compiler | left alone | env only | Traces executable-cache hits and stores on stderr; `blade run --verbose` sets it. *No notes.* |
 
 ## Infrastructure
 
@@ -136,13 +136,13 @@ Every environment variable the compiler, the programs it compiles and the test h
 | `BLADE_TOOLCHAIN_FILE` | infrastructure | blade.toolchain.json beside the executable | `<path>` that file | compiler | left alone | env only | The blade.toolchain.json consulted; written by `blade setup`, its keys mirror the environment variables. |
 | `NETCDF_DIR` | infrastructure | unset: bare -lnetcdf | `<dir>` the NetCDF include / link root | compiler | left alone | file, persisted | The NetCDF provider's include / link root. |
 | `BLADE_BLAS_FLAVOR` | infrastructure | unset | `mkl` the library is MKL: its headers, and the library preferred under BLADE_BLAS_PREFER=auto | compiler | cleared | file, persisted | Identifies the BLAS library; `mkl` selects the MKL headers and makes the library the auto preference. |
-| `BLADE_BLAS_LINK` | infrastructure | unset | `<flags>` the explicit tier's link flags (MKL, BLIS); their presence selects that tier | compiler | cleared | file, persisted | The explicit BLAS tier's link flags (MKL, BLIS); setting it selects that tier. *Not in CLAUDE.md.* |
-| `BLADE_BLAS_INCLUDE` | infrastructure | unset | `<dirs>` the explicit tier's include directories | compiler | cleared | file, persisted | The explicit BLAS tier's include directories. *Not in CLAUDE.md.* |
-| `BLADE_LAPACK_LINK` | infrastructure | unset: no LAPACK on the explicit tier | `<flags>` the explicit tier's LAPACK link flags | compiler | cleared | file, persisted | The explicit BLAS tier's LAPACK link flags. *Not in CLAUDE.md.* |
-| `BLADE_LAPACK_INCLUDE` | infrastructure | unset | `<dirs>` the explicit tier's LAPACK include directories | compiler | cleared | file, persisted | The explicit BLAS tier's LAPACK include directories. *Not in CLAUDE.md.* |
-| `MSMPI_BIN` | infrastructure | unset: mpiexec on PATH | `<dir>` the MS-MPI bin directory holding mpiexec | compiler | left alone | file, persisted | The MS-MPI bin directory `--mpi` runs mpiexec from. *Not in CLAUDE.md.* |
-| `BLADE_MEMCHECK_CXX` | infrastructure | C:\msys64\clang64\bin\clang++.exe | `<path>` the clang++ the memcheck profile tries first | compiler | left alone | env only | The clang++ the memcheck profile tries before the MSYS2 clang64 default. *Not in CLAUDE.md.* |
-| `BLADE_GR_RENDER` | infrastructure | the helper beside Blade.exe, then tools/gr-render above it | `<path>` this gr-render helper, trimmed; a path that does not exist is an error | compiler | left alone | env only | The gr-render display helper to use instead of the deployed or checkout copy. *Not in CLAUDE.md.* |
+| `BLADE_BLAS_LINK` | infrastructure | unset | `<flags>` the explicit tier's link flags (MKL, BLIS); their presence selects that tier | compiler | cleared | file, persisted | The explicit BLAS tier's link flags (MKL, BLIS); setting it selects that tier. *No notes.* |
+| `BLADE_BLAS_INCLUDE` | infrastructure | unset | `<dirs>` the explicit tier's include directories | compiler | cleared | file, persisted | The explicit BLAS tier's include directories. *No notes.* |
+| `BLADE_LAPACK_LINK` | infrastructure | unset: no LAPACK on the explicit tier | `<flags>` the explicit tier's LAPACK link flags | compiler | cleared | file, persisted | The explicit BLAS tier's LAPACK link flags. *No notes.* |
+| `BLADE_LAPACK_INCLUDE` | infrastructure | unset | `<dirs>` the explicit tier's LAPACK include directories | compiler | cleared | file, persisted | The explicit BLAS tier's LAPACK include directories. *No notes.* |
+| `MSMPI_BIN` | infrastructure | unset: mpiexec on PATH | `<dir>` the MS-MPI bin directory holding mpiexec | compiler | left alone | file, persisted | The MS-MPI bin directory `--mpi` runs mpiexec from. *No notes.* |
+| `BLADE_MEMCHECK_CXX` | infrastructure | C:\msys64\clang64\bin\clang++.exe | `<path>` the clang++ the memcheck profile tries first | compiler | left alone | env only | The clang++ the memcheck profile tries before the MSYS2 clang64 default. *No notes.* |
+| `BLADE_GR_RENDER` | infrastructure | the helper beside Blade.exe, then tools/gr-render above it | `<path>` this gr-render helper, trimmed; a path that does not exist is an error | compiler | left alone | env only | The gr-render display helper to use instead of the deployed or checkout copy. *No notes.* |
 
 ## Test harness
 
@@ -150,5 +150,5 @@ Every environment variable the compiler, the programs it compiles and the test h
 |---|---|---|---|---|---|---|---|
 | `BLADE_INTERP_TIMEOUT_MS` | test harness | 300000 | `<ms>` a positive per-test ceiling; a malformed value is the default | harness | left alone | env only | The per-test ceiling of the interpreter differential, in milliseconds. |
 | `BLADE_INTERP_JOBS` | test harness | the processor count | `<n>` n >= 1 tests prepared ahead; `1` one test at a time (the A/B arm) | harness | left alone | env only | How many tests' compiled side the interpreter differential prepares ahead of the test it judges. |
-| `BLADE_LLVM_GOLDEN_UPDATE` | test harness | off: the golden pins are asserted | `1` rewrite the LLVM golden pins instead of asserting them | harness | left alone | env only | Rewrites the LLVM lane's golden emission pins instead of asserting them. *Not in CLAUDE.md.* |
-| `BLADE_TEST_FSHARP_PARALLEL` | test harness | off: the F# pipeline runs under its lock | `1` / `on` run the F# pipeline unlocked (an experiment) | harness | left alone | env only | Runs the test harness's F# pipeline unlocked (an experiment; the default stays locked). *Not in CLAUDE.md.* |
+| `BLADE_LLVM_GOLDEN_UPDATE` | test harness | off: the golden pins are asserted | `1` rewrite the LLVM golden pins instead of asserting them | harness | left alone | env only | Rewrites the LLVM lane's golden emission pins instead of asserting them. *No notes.* |
+| `BLADE_TEST_FSHARP_PARALLEL` | test harness | off: the F# pipeline runs under its lock | `1` / `on` run the F# pipeline unlocked (an experiment) | harness | left alone | env only | Runs the test harness's F# pipeline unlocked (an experiment; the default stays locked). *No notes.* |

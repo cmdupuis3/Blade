@@ -23,6 +23,7 @@ open Blade.TypeCheckIde
 open Blade.TypeLower
 open Blade.TypeCheckSupport
 open Blade.TypeCheckInfer
+open Blade.TypeCheckInferDecl
 open Blade.TypeCheckValidate
 
 // 12. Module and Program
@@ -792,7 +793,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             | None -> None
     // Binder ids restart per compile: a block-local id from an earlier module
     // or program must not stop this module's reduce alias chase (G60).
-    Blade.TypeCheckInfer.blockLocalVidsStorage.Value <- System.Collections.Generic.HashSet<_>()
+    Blade.TypeCheckInferReduce.blockLocalVidsStorage.Value <- System.Collections.Generic.HashSet<_>()
     // Fresh module: drop any span the PREVIOUS module's decl loop left in the
     // side-channel. The static-assertion errors below are raised before this
     // module's first `checkDecl` (which is where the per-decl reset lives), so

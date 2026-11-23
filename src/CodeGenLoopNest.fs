@@ -1944,6 +1944,572 @@ let private rank2BandStillValid (plan: Rank2BandPeels) (cg: LoopNestCodeGen) (na
     && (plan.Callees |> List.forall (fun (expr, cl) ->
         match resolveCallable expr with Some now -> obj.ReferenceEquals(now, cl) | None -> false))
 
+/// The fold team's prologue of genLoopNestStreamedCore (the G35 row slots or Path B): the region is opened and
+/// `depth` advances by 3; the ChunkSimd restrict aliases rename their operand positions.
+let private openNestFoldTeam (codeGen: LoopNestCodeGen) (streamed: Map<string, ProviderReadSpec>) (foldChunk: FoldChunkPlan option)
+        (rowSlotsLive: bool) (rowSlots: (int64 * int64) option) (compoundArrays: Set<string>)
+        (fcRn: string) (fcT: string) (fcSlot: string) (fcPart: string) (fcHad: string) (fcAcc: string) (fcHas: string)
+        (ind: int -> string) (lines: string list) (depth: int) (currentNames: Map<int, string>) =
+    let mutable lines = lines
+    let mutable depth = depth
+    let mutable currentNames = currentNames
+    match foldChunk with
+    // G35 prologue: the same team sizing and the same partition as Path B,
+    // but no private accumulator -- one slot per outer index, written by the
+    // index's owner. Three scopes open (block / non-empty guard / parallel
+    // region), closed by the epilogue, exactly like Path B's. BLOCK comments:
+    // nothing here may swallow a following statement if the lines are joined.
+    | Some plan when rowSlotsLive ->
+        let (rows, cells) = rowSlots.Value
+        recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + serial ascending outer chain"
+            $"threaded complete rows (repro): {rows} outer indices partitioned per thread (Path B partition), each index's whole fold on one thread into its slot; the outer chain serial afterwards ({cells} inner fold steps)"
+        let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
+        (ompApiUsedCell ()).Value <- true
+        (foldLanesUsedCell ()).Value <- true
+        lines <- lines @ [
+            ind depth + "/* reduce over computation: threaded complete rows (repro) -- each row's fold on one thread into its slot, the outer chain serial after the region */" ]
+            @ pathBTeamOpen depth fcRn fcT outerBound
+                [ $"{plan.ElemCpp}* {fcSlot} = new {plan.ElemCpp}[{fcRn}];" ] []
+        depth <- depth + 3
+    | Some plan ->
+        // M14 (gap G25): the form inside each chunk, decided by the producer.
+        let chunkPhrase =
+            match plan.ChunkForm with
+            | ChunkSimd op -> $"omp simd reduction({op}) within each chunk"
+            | ChunkSerial why -> $"serial within each chunk: {why}"
+            | ChunkRowSlots _ -> "threaded complete rows"
+        recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + fixed-order combine"
+            $"comm-licensed parallel fold: outer level chunked per thread (Path B), {chunkPhrase}"
+        let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
+        (ompApiUsedCell ()).Value <- true
+        // The partition is blade_fold::chunk_lo (blade_fold_lanes.hpp): the ONE
+        // function every Path B site spells, so this nest's chunks coincide
+        // with the materialized fold's and the threaded vector arm's.
+        (foldLanesUsedCell ()).Value <- true
+        // ChunkSimd: the chunk's rank-1 real-array operands are read through
+        // restrict pool aliases (the vectorizer cannot otherwise prove the
+        // sweep dependence-free behind the Array struct's subscript -- the
+        // same aliases the serial licensed form uses), and the accumulator is
+        // seeded with the operator's identity so the reduction clause has a
+        // private copy to start from. Read-only sharing is permitted under
+        // restrict, `zip(x, x)` included.
+        let simdAliases =
+            match plan.ChunkForm with
+            | ChunkSimd _ ->
+                (List.head codeGen.Bindings).Elements
+                |> List.filter (fun e ->
+                    e.Virtual.IsRealArray && e.ArrayRank = 1
+                    && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true)
+                    && not (Map.containsKey e.ArrayName streamed))
+                |> List.map (fun e -> e.ArrayName)
+                |> List.distinct
+                |> List.mapi (fun i nm -> (nm, $"__rsrc{i}_{plan.Tag}"))
+            | ChunkSerial _ | ChunkRowSlots _ -> []
+        for (nm, alias) in simdAliases do
+            for e in (List.head codeGen.Bindings).Elements do
+                if e.ArrayName = nm && e.Virtual.IsRealArray && e.ArrayRank = 1
+                   && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true) then
+                    currentNames <- Map.add e.ArrayPosition alias currentNames
+        let accSeed =
+            match plan.ChunkForm with
+            | ChunkSimd "*" -> "1"
+            | ChunkSimd _ -> "0"
+            | ChunkSerial _ | ChunkRowSlots _ -> $"{plan.ElemCpp}()"
+        lines <- lines @ [
+            ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked" ]
+            @ pathBTeamOpen depth fcRn fcT outerBound
+                ([ $"{plan.ElemCpp}* {fcPart} = new {plan.ElemCpp}[{fcT}];"
+                   // Zero-initialized: it marks which slots a thread actually wrote, so
+                   // the combine is correct for ANY team size the runtime hands back
+                   // (num_threads is a request -- see the flat path's note) and skips a
+                   // chunk whose inner nest contributed nothing.
+                   $"bool* {fcHad} = new bool[{fcT}]();" ]
+                 @ (simdAliases |> List.map (fun (nm, alias) ->
+                        $"const {plan.ElemCpp}* BLADE_RESTRICT {alias} = {nm}.data;")))
+                // ChunkSerial: value-initialized, never READ before __rhas turns
+                // true (the initializer only keeps -Wmaybe-uninitialized quiet).
+                // ChunkSimd: the operator's identity, the reduction's seed.
+                [ $"{plan.ElemCpp} {fcAcc} = {accSeed};"
+                  $"bool {fcHas} = false;" ]
+        depth <- depth + 3
+    | None -> ()
+    (lines, depth, currentNames)
+
+/// The row epilogues of genLoopNestStreamedCore's nest: the canonical compact fill, the hot-row fold (and its
+/// per-cell chain), the compact row classes -- each admitted or declined, its prelude lines appended.
+let private planNestRowEpilogues (codeGen: LoopNestCodeGen) (streamed: Map<string, ProviderReadSpec>) (outRowDecl: string option) (outRowName: string)
+        (ompLastLevel: int) (pragmaLevel: int option) (ind: int -> string) (depth: int) (lines: string list) =
+    let mutable lines = lines
+    // CANONICAL COMPACT FILL: write the flat pool through the closed-form
+    // offsets instead of walking the Iliffe skeleton (see compactFlatWritePlan
+    // for the math and the gate; plan-simplex-blocked-compute.md section 0b
+    // finding 2 for the measurement). Declined outright when the nest carries a
+    // MULTI-LEVEL `collapse` -- the per-level hoists are statements BETWEEN loop
+    // headers, which g++ rejects inside a collapsed prefix ("loop not permitted
+    // in intervening code in OpenMP loop body"). No compact nest can reach that
+    // case today (level 1 of a simplex is triangular, so genNestPragma's
+    // collapse prefix stops at 1 and the nest gets `schedule(dynamic)` on level
+    // 0 alone), which is exactly why the guard is cheap to keep honest.
+    let compactFlat =
+        if outRowDecl.IsNone || ompLastLevel > (defaultArg pragmaLevel 0) then None
+        else compactFlatWritePlan codeGen outRowName
+    match compactFlat with
+    | Some plan -> lines <- lines @ [ind depth + plan.PoolDecl]
+    | None -> ()
+    // HOT-ROW FOLD SCHEDULING (Blade.Optimize.planHotRowFolds): the consumer's
+    // per-row fold runs behind each produced row, inside this nest's
+    // outermost loop. Only the plain materializing nest admits it: no fold
+    // accumulator, no slab / segment / tile substitution of the outer level
+    // (the row sums would cover one rank's rows while Allgatherv restores the
+    // whole array), no streamed source, no shared-value leaf, a hoisted output
+    // row (the rank-2 epilogue reads the row through that restrict pointer),
+    // and no `collapse` pragma spanning level 0 and 1 (OpenMP forbids
+    // intervening code inside a collapsed prefix). A declined site publishes
+    // nothing, and the consumer keeps the two-pass form.
+    let hotRow =
+        match codeGen.RowEpilogue with
+        | Some ep when codeGen.FoldWrapper.IsNone && not codeGen.MpiSlab && codeGen.ShareDecl.IsNone
+                       && Map.isEmpty streamed && List.length codeGen.Bindings >= 2
+                       && outRowDecl.IsSome && compactFlat.IsNone
+                       && not (pragmaLevel = Some 0 && ompLastLevel > 0) ->
+            Some ep
+        | _ -> None
+    // B2r (round-2 cell epilogues): the row's fold advanced per cell inside
+    // the inner level (CellStep), when the epilogue offers it and this nest's
+    // form admits it: exactly one cell loop per row (rank 2), a plain
+    // rectangular inner level, and that loop NOT threaded (a threaded cell
+    // loop must finish the row before its ordered chain runs). A refusal is
+    // recorded and the epilogue's ordinary Body is rendered instead.
+    let cellStep =
+        match hotRow with
+        | Some ep when ep.CellStep.IsSome ->
+            let inner = List.last codeGen.Bindings
+            if List.length codeGen.Bindings <> 2 then
+                ep.OnCellStepDeclined "the producer nest is not one cell loop per row"; None
+            elif ompLastLevel >= 1 || pragmaLevel = Some 1 then
+                ep.OnCellStepDeclined "the cell loop is threaded (its row must finish before the ordered chain runs)"; None
+            elif not inner.BoundDependencies.IsEmpty || inner.StrictOffset <> 0 || (domainPlanOfLevel inner).IsSome then
+                ep.OnCellStepDeclined "the cell loop is not a plain rectangular sweep"; None
+            else ep.CellStep
+        | _ -> None
+    match hotRow with
+    | Some ep ->
+        lines <- lines @ [ ind depth + $"// hot-row fold: `{ep.RowSumName}` holds the row fold of each row of `{codeGen.OutputName}`, computed right after the row is produced (Blade.Optimize.planHotRowFolds)" ]
+        if cellStep.IsSome then
+            lines <- lines @ [ ind depth + $"// cell epilogue: each row's fold advances on each cell right behind its store (`{ep.ChainName}`, register-consume), same +0 seed, same ascending order, same products" ]
+        for l in ep.Prelude do lines <- lines @ [ind depth + l]
+    | None -> ()
+    let cellBlock =
+        match hotRow, cellStep with
+        | Some ep, Some _ when ep.ChainBlock > 0L -> Some ep.ChainBlock
+        | _ -> None
+    // COMPACT ROW CLASSES (Blade.Optimize.planCompactRowClasses): the orbit
+    // fold's per-row class partials behind each packed row. The compact
+    // flat-write twin of the hot-row admission above: a rank-2 compact pool
+    // written through the hoisted row pointer (`compactFlat`), and none of
+    // the forms that would split or reorder the outer level. A declined site
+    // publishes nothing; the consumer keeps the orbit-class pass.
+    let compactRow =
+        match codeGen.CompactRowEpilogue with
+        | Some ep when hotRow.IsNone && codeGen.FoldWrapper.IsNone && not codeGen.MpiSlab && codeGen.ShareDecl.IsNone
+                       && Map.isEmpty streamed && List.length codeGen.Bindings = 2
+                       && compactFlat.IsSome
+                       && not (pragmaLevel = Some 0 && ompLastLevel > 0) ->
+            Some ep
+        | Some ep ->
+            recordCodegenDecision "compact-row-classes" "" (Blade.Effects.Declined "the producer is not emitted by the plain compact row nest (sliced, streamed, fused-fold or collapsed form)") [ $"orbit fold of `{codeGen.OutputName}`" ]
+            ep.OnDeclined ()
+            None
+        | None -> None
+    match compactRow with
+    | Some ep -> for l in ep.Prelude do lines <- lines @ [ind depth + l]
+    | None -> ()
+    (lines, compactFlat, hotRow, cellStep, cellBlock, compactRow)
+
+/// The census marker of a requested-but-suppressed pragma at a nest's outer level (genLoopNestStreamedCore).
+let private nestSuppressedMarker (codeGen: LoopNestCodeGen) (pragmaLevel: int option) (nestKernelWrites: bool) (foldChunk: FoldChunkPlan option)
+        (rowSlotsLive: bool) (ind: int -> string) (depth: int) (isOuter: bool) : string list =
+    if isOuter then
+        let reason =
+            // The BUILD KNOB is reported FIRST when it is what declined:
+            // with serial emission on, every other reason is unreachable
+            // as an explanation (the nest would have been serial anyway),
+            // and naming the knob is what tells a reader that the same
+            // source built without it WOULD be threaded.
+            if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
+            elif codeGen.FoldWrapper.IsSome && codeGen.FoldOmpDecline.IsSome then
+                codeGen.FoldOmpDecline.Value
+            elif codeGen.FoldWrapper.IsSome then
+                "fold accumulates into a shared scalar, which is not race-safe"
+            elif nestKernelWrites then
+                "the kernel may write storage outside itself (G41: a writing producer keeps an ordered loop)"
+            elif codeGen.Bindings |> List.exists (fun b -> (domainPlanOfLevel b).IsSome) then
+                "a closed-form domain nest carries one sequential cell counter and has no thread-level form yet"
+            else "the omp(...) depth licenses no level of this nest"
+        // "Emitted" means the nest gets a pragma SOMEWHERE, not
+        // necessarily at this level -- an inner-licensed nest is
+        // parallelized and must not be reported as serial. A Path B
+        // fold nest counts as emitted: the parallel region is the
+        // prologue above, not a `for` pragma on any level.
+        // A MAP licence the fold turned into a chunk plan (bench gap
+        // G27) is reported by the FoldChunk lines below when the plan
+        // is dead, so it is excluded here -- one census line per drop.
+        ompSuppressedMarker (codeGen.OmpRequested && codeGen.FoldChunk.IsNone)
+                            (pragmaLevel.IsSome || foldChunk.IsSome) reason (ind depth)
+        // A Path B fold nest requested omp through `FoldChunk`, not
+        // through `OmpRequested` (which the fold path leaves unset), so
+        // a knob-suppressed chunk plan would otherwise vanish without a
+        // trace. This is the census line for exactly that case.
+        @ (if codeGen.FoldChunk.IsSome && not (ompThreadEmissionEnabled ())
+           then [ ind depth + $"// {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))}" ]
+           // The row-slot form SPENDS the request (a live team), so
+           // a repro build that took it has no drop to report.
+           elif codeGen.FoldChunk.IsSome && not (fpReassocEnabled ()) && not rowSlotsLive
+           then [ ind depth + $"// {(ompSuppressedPhrase (fpReproReason ()))}" ]
+           else [])
+    else []
+
+/// The loop header of one nest level (genLoopNestStreamedCore).
+let private nestLevelHeader (codeGen: LoopNestCodeGen) (foldChunk: FoldChunkPlan option) (compoundArrays: Set<string>) (lastBindingIdx: int)
+        (cellBlock: int64 option) (isOuter: bool) (bidx: int) (binding: LoopIndexBinding) : string =
+    // A closed-form domain level is its own affine nest; it is never
+    // chunked (chunkable excludes it) and never MPI-sliced.
+    match domainPlanOfLevel binding with
+    | Some plan -> genDomainLoopHeader binding plan
+    | None ->
+    if isOuter && codeGen.MpiSlab then
+        sprintf "for (size_t %s = __blade_mpi_lo_%s; %s < __blade_mpi_hi_%s; %s++) {"
+            binding.IndexName codeGen.OutputName
+            binding.IndexName codeGen.OutputName
+            binding.IndexName
+    // Path B: the outermost level iterates this thread's chunk
+    // [__rlo, __rhi) of [0, extent). Same substitution shape as the MPI
+    // slab above; inner levels are untouched, so a triangular inner nest
+    // runs exactly as it would serially for each outer index owned here.
+    elif isOuter && foldChunk.IsSome then
+        $"for (size_t {binding.IndexName} = __rlo; {binding.IndexName} < __rhi; {binding.IndexName}++) {{"
+    // B2r mini-blocks (epi_blk_r > 0): the cell loop walks the block
+    // [__cbk, __cbe) that the strip-mine loop opened just above it.
+    elif bidx = lastBindingIdx && cellBlock.IsSome then
+        $"for (size_t {binding.IndexName} = __cbk; {binding.IndexName} < __cbe; {binding.IndexName}++) {{"
+    else genForLoopHeader compoundArrays binding
+
+/// The element bindings of one nest level (genLoopNestStreamedCore): the peel lines appended, the operand
+/// positions' current names, the kernel parameters' final names and the streamed sites advanced.
+let private genNestLevelPeels (streamed: Map<string, ProviderReadSpec>) (windowReads: Rank1WindowReads option) (bandPeels: Rank2BandPeels option)
+        (restrictSites: Set<int * int>) (ind: int -> string) (depth: int) (levelIdx: int) (binding: LoopIndexBinding)
+        (lines: string list) (currentNames: Map<int, string>) (paramFinalNames: Map<int, string>) (streamSites: Map<int, string list>) =
+    let mutable lines = lines
+    let mutable currentNames = currentNames
+    let mutable paramFinalNames = paramFinalNames
+    let mutable streamSites = streamSites
+    // Generate element bindings for all arrays at this level. Zipping an
+    // array WITH ITSELF puts two operand slots on the same (array, index):
+    // both peel to the byte-identical declaration, so an identical
+    // (name, code) pair is emitted once (the second slot's params resolve
+    // to the first slot's binding via paramFinalNames below); the second
+    // `double A____i0 = A[__i0];` was a g++ redeclaration error.
+    let mutable declaredNames : Map<string, string> = Map.empty
+    for elem in binding.Elements do
+        match Map.tryFind elem.ArrayName streamed with
+        | Some sspec ->
+            // Streamed source: no array to peel -- accumulate the site
+            // coordinate; at the fiber level this emits the provider
+            // read + the rank-1 wrapper the kernel body consumes.
+            let acc = Map.tryFind elem.ArrayPosition streamSites |> Option.defaultValue []
+            let (codeLines, fiberBound, acc') = genElementBindingStreamed binding elem sspec acc
+            streamSites <- Map.add elem.ArrayPosition acc' streamSites
+            for c in codeLines do
+                lines <- lines @ [ind depth + c]
+            (match fiberBound with
+             | Some fname ->
+                 currentNames <- Map.add elem.ArrayPosition fname currentNames
+                 paramFinalNames <- Map.add elem.ParamVarId fname paramFinalNames
+             | None -> ())
+        | None ->
+            let currentName =
+                Map.tryFind elem.ArrayPosition currentNames
+                |> Option.defaultValue elem.ArrayName
+            let rawRow = Set.contains (levelIdx, elem.ArrayPosition) restrictSites
+            let (code, newName) =
+                match windowReads |> Option.bind (fun p -> p.Peels |> List.tryFind (fun (e, _) -> obj.ReferenceEquals(e, elem))) with
+                | Some (_, win) ->
+                    let newName = $"{currentName}__{binding.IndexName}"
+                    ($"{(elemTypeToCpp elem.ArrayElemType)} {newName} = {win}[static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo))];", newName)
+                | None ->
+                    match bandPeels |> Option.bind (fun p -> p.OuterPeels |> List.tryFind (fun (e, _) -> obj.ReferenceEquals(e, elem))) with
+                    | Some (_, win) ->
+                        let newName = $"{currentName}__{binding.IndexName}"
+                        let columns = bandPeels.Value.Columns
+                        ($"double* BLADE_RESTRICT {newName} = {win} + static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo)) * {columns}UL;", newName)
+                    | None -> genElementBindingPeel rawRow binding elem currentName
+            if Map.tryFind newName declaredNames <> Some code then
+                lines <- lines @ [ind depth + code]
+            declaredNames <- Map.add newName code declaredNames
+            currentNames <- Map.add elem.ArrayPosition newName currentNames
+            // Record mapping for kernel body
+            match elem.Virtual with
+            | VirtualRange _ | VirtualReverse ->
+                paramFinalNames <- Map.add elem.ParamVarId elem.ParamName paramFinalNames
+            | RealArray ->
+                paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
+    (lines, currentNames, paramFinalNames, streamSites)
+
+// ARRAY-VALUED KERNEL RETURN (stage S3, manifestation M-C1). When the
+// kernel returns an array, the output type carries the kernel's
+// T-dimensions after the iterated ones, so `arrayRank > nest depth` and the
+// per-iteration product is a whole ROW, not a cell. `out[i] = <call>` (what
+// the pre-S3 emitter wrote) assigns an `Array<T,m>` wrapper into a slot the
+// C++ side types as a scalar or a row pointer -- the shape that compiled,
+// ran, and printed `[[], []]`.
+//
+// Instead: evaluate the row once, copy its pool into the output pool at the
+// row's offset, and free it when the callee owned it. The destination is
+// computed from `<name>_extents` -- the SAME table the allocation used, now
+// carrying the trailing T-dims -- rather than from a chained `out[i][j]`
+// subscript, so it is one formula for any inner rank and needs nothing from
+// the wrapper's operator[] typing.
+//
+// Gated to DENSE rectangular outputs: the flat row-major offset below is
+// exact only when no axis is packed. A symmetric/compound/sparse output
+// with an array-valued kernel falls through to the old cell assignment,
+// which the C++ compiler then rejects -- loud, and out of scope here.
+//
+// FREEING is conditional on `freshReturnOf`. A kernel that CONSTRUCTS its
+// row (the S2 call form over a materializing body) hands back storage this
+// call allocated, so not freeing it leaks one row per outer cell. A kernel
+// that PASSES ITS INPUT ROW THROUGH (`lambda(r) -> r`) hands back a view of
+// the operand -- freeing that would destroy the input. `NotFresh` (which is
+// also what an unresolvable callee reads as) leaks rather than guesses,
+// matching the surrounding block's rule 3.
+let private nestRowWriteLines (codeGen: LoopNestCodeGen) (nameMap: Map<int, string>) (reynoldsResult: Lazy<ReynoldsResult>) : string list option =
+    match codeGen.OutputType with
+    | ArrayElem at when codeGen.FoldWrapper.IsNone
+                        && not (isCompoundArrayType at)
+                        && not (isSparseArrayType at)
+                        && not (hasRealSymmetry codeGen.OutputSymmVec)
+                        && not (List.isEmpty codeGen.Bindings)
+                        && arrayRank at > List.length codeGen.Bindings ->
+        let rank = arrayRank at
+        let outer = List.length codeGen.Bindings
+        let extentsName = $"{codeGen.OutputName}_extents"
+        let elemStr = elemTypeToCpp at.ElemType
+        let innerCells =
+            [ outer .. rank - 1 ] |> List.map (sprintf "%s[%d]" extentsName) |> String.concat " * "
+        // Row-major flattening of the OUTER indices (inner indices are 0):
+        // (((i0) * e1 + i1) * e2 + i2) ...
+        let flatOuter =
+            codeGen.Bindings
+            |> List.mapi (fun i b -> (i, b.IndexName))
+            |> List.fold (fun acc (i, nm) ->
+                    if i = 0 then nm
+                    else $"({acc}) * {extentsName}[{i}] + {nm}") ""
+        let freeLine =
+            let callee = match codeGen.KernelExpr with IRApp (f, _, _) -> Some f | _ -> None
+            match callee with
+            | Some f when freshReturnOf f = FreshPool ->
+                [ $"    deallocate<typename promote<{elemStr}, {(rank - outer)}>::type, nullptr>(__rowv.data, __rowv.extents);" ]
+            | _ -> []
+        // Literal row: store the cells directly, no temporary. Reynolds is
+        // excluded -- symmetrizing a body means SUMMING its permuted
+        // copies, and a per-cell sum of array literals is not what the
+        // stores below write; that shape falls through to the generic arm.
+        //
+        // A BLOCK-bodied literal kernel -- scalar lets ahead of the array
+        // literal (`lambda(w) -> { let x = ...; [x + y, x - y] }`, the
+        // halo/segment shape) -- takes the same direct-store path: the
+        // lets render as statements inside the row-write scope, visible
+        // to the leaf stores. The shape check is PURE (no rendering), so
+        // a declined shape leaves no sentinel side effect behind.
+        let rec literalTailOf e = match e with IRLet (_, _, b) -> literalTailOf b | t -> t
+        let literalLeaves =
+            match literalTailOf codeGen.KernelExpr with
+            | IRArrayLit _ as tail when not codeGen.HasReynolds ->
+                match arrayLitScalarLeaves tail,
+                      staticCellsOfAxes at outer (rank - 1) with
+                // Leaf count MUST equal the destination row's cell count:
+                // the output extents are deduced from the literal's shape,
+                // so a disagreement means the deduction and the body have
+                // drifted apart, and writing anyway would run off the row.
+                | Some leaves, Some cells when leaves.Length = cells -> Some leaves
+                | _ -> None
+            | _ -> None
+        match literalLeaves with
+        | Some leaves ->
+            let subst = emptySubst
+            // Render the let prefix (empty for a bare literal body): each
+            // non-unit value becomes a scoped local named __v<id> --
+            // renderLetExpr's convention, so the leaves' IRVar references
+            // resolve -- and unit values keep their statement form.
+            let rec renderLetPrefix nm acc e =
+                match e with
+                | IRLet (lid, v, b) ->
+                    let nm' = Map.add lid ((localVarName lid)) nm
+                    let lines =
+                        if isUnitExpr v then
+                            match renderUnitStmts subst nm v with
+                            | "" -> []
+                            | s -> [$"    {s}"]
+                        else [$"    auto {(localVarName lid)} = {(exprToCppCore subst nm v)};"]
+                    renderLetPrefix nm' (acc @ lines) b
+                | _ -> (nm, acc)
+            let (leafMap, letLines) = renderLetPrefix nameMap [] codeGen.KernelExpr
+            Some ([
+                    "{"
+                  ] @ letLines @ [
+                    $"    const size_t __rowc = (size_t)({innerCells});"
+                    $"    {elemStr}* __rowd = nested_array_utilities::pool_base({codeGen.OutputName}.data) + (({flatOuter}) * __rowc);"
+                  ] @ (leaves |> List.mapi (fun k leaf ->
+                            $"    __rowd[{k}] = {(exprToCppCore subst leafMap leaf)};"))
+                    @ [ "}" ])
+        | None ->
+        Some ([
+                "{"
+                $"    auto __rowv = {reynoldsResult.Value.CppExpr};"
+                $"    const {elemStr}* __rows = nested_array_utilities::pool_base(__rowv.data);"
+                $"    const size_t __rowc = (size_t)({innerCells});"
+                $"    {elemStr}* __rowd = nested_array_utilities::pool_base({codeGen.OutputName}.data) + (({flatOuter}) * __rowc);"
+                "    for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];"
+              ] @ freeLine @ [ "}" ])
+    | _ -> None
+
+// Generate kernel assignment (with Reynolds permutation sum if applicable).
+// The shape of the assignment depends on output type:
+//   - Array output: indexed slot assignment, `name[i][j]... = kernelBody;`.
+//     Each loop binding contributes one bracketed index. This is the standard
+//     case for `method_for(...) <@> kernel` returning a tensor.
+//   - Scalar output: sum accumulation, `name += kernelBody;`. The loop nest
+//     still iterates over input dimensions, but the kernel result is summed
+//     into a scalar accumulator declared by the caller (genApplyCombinator).
+//     Used when the function's return type is scalar even though the
+//     `<@>` kernel produces a per-iteration value (the Cartesian-sum-reduce
+//     pattern).
+let private genNestKernelWrite (windowReads: Rank1WindowReads option) (codeGen: LoopNestCodeGen) (nameMap: Map<int, string>) (paramFinalNames: Map<int, string>)
+        (outRowDecl: string option) (outRowName: string) (foldChunk: FoldChunkPlan option) (fcSlot: string) (foldAccName: string) (fcHas: string)
+        (cellStep: (string -> string) option) (ind: int -> string) (depth: int) (lines: string list) : string list =
+    let mutable lines = lines
+    let outputIdx =
+        match codeGen.OutputType with
+        | IRTScalar _ -> ""
+        // Tabulated (compound/sparse) output inherits the input's index: write
+        // into the compact buffer (.data[r*stride + t]), not a dense [i][j] slot.
+        | ArrayElem at when isCompoundArrayType at || isSparseArrayType at ->
+            compoundOutputSubscript codeGen.Bindings codeGen.OutputName
+        | _ ->
+            codeGen.Bindings
+            |> List.map (fun b -> $"[{b.IndexName}]")
+            |> String.concat ""
+    let assignOp =
+        match codeGen.OutputType with
+        | IRTScalar _ -> "+="
+        | _ -> "="
+
+    // LAZY, because rendering is not free of side effects: `exprToCpp`'s
+    // refusal path appends to the expression-sentinel cell (which becomes an
+    // `#error` in the translation unit) whether or not the caller keeps the
+    // string. The literal-row arm below discards this value, and an eagerly
+    // rendered array-literal body left a spurious `#error` behind in an
+    // otherwise perfectly good program.
+    let reynoldsResult =
+        lazy (
+            match windowReads with
+            | Some p ->
+                let subst =
+                    p.Reads |> List.map (fun (node, w, offset, win) ->
+                        let center = exprToCpp nameMap w
+                        node, $"{win}[static_cast<size_t>((static_cast<int64_t>({center}) + ({offset}LL)) - static_cast<int64_t>(__w_lo))]")
+                { CppExpr = exprToCppWithSubst subst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
+            | None -> genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
+    if codeGen.HasReynolds && reynoldsResult.Value.UniqueTerms < reynoldsResult.Value.TotalPerms then
+        lines <- lines @ [ind depth + $"// Reynolds: {reynoldsResult.Value.UniqueTerms}/{reynoldsResult.Value.TotalPerms} perms unique (dedup {reynoldsResult.Value.TotalPerms / max 1 reynoldsResult.Value.UniqueTerms}x)"]
+    // When the output row was hoisted, the write goes through the
+    // restrict-qualified row pointer and only the innermost subscript remains.
+    let (writeTarget, writeIdx) =
+        match outRowDecl with
+        | Some _ -> (outRowName, $"[{(List.last codeGen.Bindings).IndexName}]")
+        | None -> (codeGen.OutputName, outputIdx)
+    let rowWriteLines : string list option = nestRowWriteLines codeGen nameMap reynoldsResult
+    // Lazy for `reynoldsResult`'s reason: `rowWriteLines`, when it fires, is
+    // the whole write, and rendering this line anyway would re-enter the
+    // kernel expression -- and its sentinel side effect -- for nothing.
+    let assignLine = lazy (
+        match codeGen.FoldWrapper, foldChunk with
+        // Path B: accumulate into the THREAD-PRIVATE scalar, seeding it
+        // from the chunk's first contributed value. The cell value is bound once
+        // (the kernel expression can be a large Reynolds sum) and the branch is
+        // loop-invariant after the first iteration.
+        | Some wname, Some plan ->
+            match plan.ChunkForm with
+            // G35: the row's complete value into its own slot, indexed by the
+            // outer level's loop counter (the nest is one level: the row
+            // kernel's body is the whole fold, rendered as it is serially).
+            | ChunkRowSlots _ ->
+                $"{fcSlot}[{(List.head codeGen.Bindings).IndexName}] = {reynoldsResult.Value.CppExpr};"
+            // ChunkSimd: the reduction statement in the `x = x op expr` shape
+            // the clause requires, into the identity-seeded private copy.
+            | ChunkSimd op -> $"{foldAccName} = {foldAccName} {op} {reynoldsResult.Value.CppExpr};"
+            | ChunkSerial _ ->
+            sprintf "{ %s __rv = %s; if (%s) %s = %s(%s, __rv); else { %s = __rv; %s = true; } }"
+                plan.ElemCpp reynoldsResult.Value.CppExpr
+                fcHas foldAccName wname foldAccName
+                foldAccName fcHas
+        // Fused fold: accumulate the kernel value through the fold-kernel
+        // wrapper into the caller-declared scalar accumulator.
+        | Some wname, None -> $"{codeGen.OutputName} = {wname}({codeGen.OutputName}, {reynoldsResult.Value.CppExpr});"
+        | None, _ ->
+            match cellStep with
+            // B2r register-consume: the cell bound once (its own element
+            // type), stored, then handed to the row's chain.
+            | Some step ->
+                let cellElem = match codeGen.OutputType with ArrayElem at -> elemTypeToCpp at.ElemType | _ -> "double"
+                let stepText = step "__c"
+                $"{{ const {cellElem} __c = {reynoldsResult.Value.CppExpr}; {writeTarget}{writeIdx} {assignOp} __c; {stepText} }}"
+            | None -> $"{writeTarget}{writeIdx} {assignOp} {reynoldsResult.Value.CppExpr};")
+    match rowWriteLines with
+    | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
+    | None -> lines <- lines @ [ind depth + assignLine.Value]
+    lines
+
+/// The close of a hot-row nest (genLoopNestStreamedCore): the inner levels, then the row's fold on the
+/// just-completed slice inside the outermost loop, then the outermost level.
+let private closeNestHotRow (codeGen: LoopNestCodeGen) (cellStep: (string -> string) option) (cellBlock: int64 option) (outRowName: string)
+        (ind: int -> string) (ep: RowEpilogue) (lines: string list) (depth: int) : string list * int =
+    let mutable lines = lines
+    let mutable depth = depth
+    for _ in List.tail codeGen.Bindings do
+        depth <- depth - 1
+        lines <- lines @ [ind depth + "}"]
+    // B2r mini-blocks: close the strip-mine loop around the cell loop.
+    if cellBlock.IsSome then
+        depth <- depth - 1
+        lines <- lines @ [ind depth + "}"]
+    let (elemStr, rank) =
+        match codeGen.OutputType with
+        | ArrayElem at -> (elemTypeToCpp at.ElemType, arrayRank at)
+        | _ -> ("double", 2)
+    let outerIdx = (List.head codeGen.Bindings).IndexName
+    // Rank 2: the slice IS the hoisted output row, read through the
+    // restrict pointer it was written through (any other access path to a
+    // row written through a restrict pointer in the same scope would
+    // violate the qualifier's contract). Rank >= 3: the slice is the
+    // skeleton's leading entry, and the row pointer's scope (the level
+    // r-2 body) has already closed.
+    let viewData = if rank = 2 then outRowName else $"{codeGen.OutputName}.data[{outerIdx}]"
+    lines <- lines @ [ ind depth + "{"
+                       ind depth + $"    Array<{elemStr}, {rank - 1}> {ep.RowViewName} = {{ {viewData}, {codeGen.OutputName}.extents + 1 }};" ]
+    let epBody = if cellStep.IsSome then ep.ChainBody () else ep.Body ()
+    for l in epBody do lines <- lines @ [ind depth + "    " + l]
+    if cellStep.IsSome then
+        let blocks = match cellBlock with Some r -> $"mini-blocks of {r}" | None -> "one fused loop"
+        Blade.Optimize.recordCellEpilogue ep.Subject Blade.Effects.Applied
+            [ $"row chain interleave ({blocks}): each row's prodsum(row, row) chain advances on each cell right behind its store (register-consume) into `{ep.ChainName}`, stored as the row's value"
+              "strict-legal: the same products of the same stored values added in the same ascending order to the same +0; the outer combine is unchanged" ]
+    lines <- lines @ [ ind depth + "}" ]
+    depth <- depth - 1
+    lines <- lines @ [ind depth + "}"]
+    ep.OnEmitted ()
+    (lines, depth)
+
 let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (bandPeels: Rank2BandPeels option)
                                    (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen)
                                    (outerNames: Map<int, string>) (indent: int) : string list =
@@ -1988,7 +2554,7 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
     // Streamed sources: accumulated ABSOLUTE site coordinates per array
     // position (consumed by the fiber read at the S/T boundary).
     let mutable streamSites : Map<int, string list> = Map.empty
-    
+
     // Generate nested loops with element bindings
     // Nest-level OpenMP pragma (collapse for rectangular, dynamic for triangular)
     // is prepended only at the outermost level.
@@ -2107,86 +2673,11 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
     // open the explicit parallel region. Three scopes open here (block / non-
     // empty guard / parallel region) and are closed by the epilogue after the
     // nest, so `depth` advances by 3 before the first loop header.
-    match foldChunk with
-    // G35 prologue: the same team sizing and the same partition as Path B,
-    // but no private accumulator -- one slot per outer index, written by the
-    // index's owner. Three scopes open (block / non-empty guard / parallel
-    // region), closed by the epilogue, exactly like Path B's. BLOCK comments:
-    // nothing here may swallow a following statement if the lines are joined.
-    | Some plan when rowSlotsLive ->
-        let (rows, cells) = rowSlots.Value
-        recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + serial ascending outer chain"
-            $"threaded complete rows (repro): {rows} outer indices partitioned per thread (Path B partition), each index's whole fold on one thread into its slot; the outer chain serial afterwards ({cells} inner fold steps)"
-        let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
-        (ompApiUsedCell ()).Value <- true
-        (foldLanesUsedCell ()).Value <- true
-        lines <- lines @ [
-            ind depth + "/* reduce over computation: threaded complete rows (repro) -- each row's fold on one thread into its slot, the outer chain serial after the region */" ]
-            @ pathBTeamOpen depth fcRn fcT outerBound
-                [ $"{plan.ElemCpp}* {fcSlot} = new {plan.ElemCpp}[{fcRn}];" ] []
-        depth <- depth + 3
-    | Some plan ->
-        // M14 (gap G25): the form inside each chunk, decided by the producer.
-        let chunkPhrase =
-            match plan.ChunkForm with
-            | ChunkSimd op -> $"omp simd reduction({op}) within each chunk"
-            | ChunkSerial why -> $"serial within each chunk: {why}"
-            | ChunkRowSlots _ -> "threaded complete rows"
-        recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + fixed-order combine"
-            $"comm-licensed parallel fold: outer level chunked per thread (Path B), {chunkPhrase}"
-        let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
-        (ompApiUsedCell ()).Value <- true
-        // The partition is blade_fold::chunk_lo (blade_fold_lanes.hpp): the ONE
-        // function every Path B site spells, so this nest's chunks coincide
-        // with the materialized fold's and the threaded vector arm's.
-        (foldLanesUsedCell ()).Value <- true
-        // ChunkSimd: the chunk's rank-1 real-array operands are read through
-        // restrict pool aliases (the vectorizer cannot otherwise prove the
-        // sweep dependence-free behind the Array struct's subscript -- the
-        // same aliases the serial licensed form uses), and the accumulator is
-        // seeded with the operator's identity so the reduction clause has a
-        // private copy to start from. Read-only sharing is permitted under
-        // restrict, `zip(x, x)` included.
-        let simdAliases =
-            match plan.ChunkForm with
-            | ChunkSimd _ ->
-                (List.head codeGen.Bindings).Elements
-                |> List.filter (fun e ->
-                    e.Virtual.IsRealArray && e.ArrayRank = 1
-                    && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true)
-                    && not (Map.containsKey e.ArrayName streamed))
-                |> List.map (fun e -> e.ArrayName)
-                |> List.distinct
-                |> List.mapi (fun i nm -> (nm, $"__rsrc{i}_{plan.Tag}"))
-            | ChunkSerial _ | ChunkRowSlots _ -> []
-        for (nm, alias) in simdAliases do
-            for e in (List.head codeGen.Bindings).Elements do
-                if e.ArrayName = nm && e.Virtual.IsRealArray && e.ArrayRank = 1
-                   && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true) then
-                    currentNames <- Map.add e.ArrayPosition alias currentNames
-        let accSeed =
-            match plan.ChunkForm with
-            | ChunkSimd "*" -> "1"
-            | ChunkSimd _ -> "0"
-            | ChunkSerial _ | ChunkRowSlots _ -> $"{plan.ElemCpp}()"
-        lines <- lines @ [
-            ind depth + "// reduce over computation: comm-licensed parallel fold, outer level chunked" ]
-            @ pathBTeamOpen depth fcRn fcT outerBound
-                ([ $"{plan.ElemCpp}* {fcPart} = new {plan.ElemCpp}[{fcT}];"
-                   // Zero-initialized: it marks which slots a thread actually wrote, so
-                   // the combine is correct for ANY team size the runtime hands back
-                   // (num_threads is a request -- see the flat path's note) and skips a
-                   // chunk whose inner nest contributed nothing.
-                   $"bool* {fcHad} = new bool[{fcT}]();" ]
-                 @ (simdAliases |> List.map (fun (nm, alias) ->
-                        $"const {plan.ElemCpp}* BLADE_RESTRICT {alias} = {nm}.data;")))
-                // ChunkSerial: value-initialized, never READ before __rhas turns
-                // true (the initializer only keeps -Wmaybe-uninitialized quiet).
-                // ChunkSimd: the operator's identity, the reduction's seed.
-                [ $"{plan.ElemCpp} {fcAcc} = {accSeed};"
-                  $"bool {fcHas} = false;" ]
-        depth <- depth + 3
-    | None -> ()
+    let (lines1, depth1, currentNames1) =
+        openNestFoldTeam codeGen streamed foldChunk rowSlotsLive rowSlots compoundArrays fcRn fcT fcSlot fcPart fcHad fcAcc fcHas ind lines depth currentNames
+    lines <- lines1
+    depth <- depth1
+    currentNames <- currentNames1
     // Which rank-1 input peels may drop the Array<T,1> wrapper for a
     // raw `BLADE_RESTRICT` row pointer (see restrictPeelSites for the proof
     // obligation). Streamed positions are handled by genElementBindingStreamed
@@ -2273,90 +2764,9 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
             // The macro spelling (blade_portability.hpp): BLADE_OMP_PARALLEL_FOR_COLLAPSE(d).
             let m = System.Text.RegularExpressions.Regex.Match(txt, @"_COLLAPSE\((\d+)\)")
             if m.Success then pl + int m.Groups.[1].Value - 1 else pl
-    // CANONICAL COMPACT FILL: write the flat pool through the closed-form
-    // offsets instead of walking the Iliffe skeleton (see compactFlatWritePlan
-    // for the math and the gate; plan-simplex-blocked-compute.md section 0b
-    // finding 2 for the measurement). Declined outright when the nest carries a
-    // MULTI-LEVEL `collapse` -- the per-level hoists are statements BETWEEN loop
-    // headers, which g++ rejects inside a collapsed prefix ("loop not permitted
-    // in intervening code in OpenMP loop body"). No compact nest can reach that
-    // case today (level 1 of a simplex is triangular, so genNestPragma's
-    // collapse prefix stops at 1 and the nest gets `schedule(dynamic)` on level
-    // 0 alone), which is exactly why the guard is cheap to keep honest.
-    let compactFlat =
-        if outRowDecl.IsNone || ompLastLevel > (defaultArg pragmaLevel 0) then None
-        else compactFlatWritePlan codeGen outRowName
-    match compactFlat with
-    | Some plan -> lines <- lines @ [ind depth + plan.PoolDecl]
-    | None -> ()
-    // HOT-ROW FOLD SCHEDULING (Blade.Optimize.planHotRowFolds): the consumer's
-    // per-row fold runs behind each produced row, inside this nest's
-    // outermost loop. Only the plain materializing nest admits it: no fold
-    // accumulator, no slab / segment / tile substitution of the outer level
-    // (the row sums would cover one rank's rows while Allgatherv restores the
-    // whole array), no streamed source, no shared-value leaf, a hoisted output
-    // row (the rank-2 epilogue reads the row through that restrict pointer),
-    // and no `collapse` pragma spanning level 0 and 1 (OpenMP forbids
-    // intervening code inside a collapsed prefix). A declined site publishes
-    // nothing, and the consumer keeps the two-pass form.
-    let hotRow =
-        match codeGen.RowEpilogue with
-        | Some ep when codeGen.FoldWrapper.IsNone && not codeGen.MpiSlab && codeGen.ShareDecl.IsNone
-                       && Map.isEmpty streamed && List.length codeGen.Bindings >= 2
-                       && outRowDecl.IsSome && compactFlat.IsNone
-                       && not (pragmaLevel = Some 0 && ompLastLevel > 0) ->
-            Some ep
-        | _ -> None
-    // B2r (round-2 cell epilogues): the row's fold advanced per cell inside
-    // the inner level (CellStep), when the epilogue offers it and this nest's
-    // form admits it: exactly one cell loop per row (rank 2), a plain
-    // rectangular inner level, and that loop NOT threaded (a threaded cell
-    // loop must finish the row before its ordered chain runs). A refusal is
-    // recorded and the epilogue's ordinary Body is rendered instead.
-    let cellStep =
-        match hotRow with
-        | Some ep when ep.CellStep.IsSome ->
-            let inner = List.last codeGen.Bindings
-            if List.length codeGen.Bindings <> 2 then
-                ep.OnCellStepDeclined "the producer nest is not one cell loop per row"; None
-            elif ompLastLevel >= 1 || pragmaLevel = Some 1 then
-                ep.OnCellStepDeclined "the cell loop is threaded (its row must finish before the ordered chain runs)"; None
-            elif not inner.BoundDependencies.IsEmpty || inner.StrictOffset <> 0 || (domainPlanOfLevel inner).IsSome then
-                ep.OnCellStepDeclined "the cell loop is not a plain rectangular sweep"; None
-            else ep.CellStep
-        | _ -> None
-    match hotRow with
-    | Some ep ->
-        lines <- lines @ [ ind depth + $"// hot-row fold: `{ep.RowSumName}` holds the row fold of each row of `{codeGen.OutputName}`, computed right after the row is produced (Blade.Optimize.planHotRowFolds)" ]
-        if cellStep.IsSome then
-            lines <- lines @ [ ind depth + $"// cell epilogue: each row's fold advances on each cell right behind its store (`{ep.ChainName}`, register-consume), same +0 seed, same ascending order, same products" ]
-        for l in ep.Prelude do lines <- lines @ [ind depth + l]
-    | None -> ()
-    let cellBlock =
-        match hotRow, cellStep with
-        | Some ep, Some _ when ep.ChainBlock > 0L -> Some ep.ChainBlock
-        | _ -> None
-    // COMPACT ROW CLASSES (Blade.Optimize.planCompactRowClasses): the orbit
-    // fold's per-row class partials behind each packed row. The compact
-    // flat-write twin of the hot-row admission above: a rank-2 compact pool
-    // written through the hoisted row pointer (`compactFlat`), and none of
-    // the forms that would split or reorder the outer level. A declined site
-    // publishes nothing; the consumer keeps the orbit-class pass.
-    let compactRow =
-        match codeGen.CompactRowEpilogue with
-        | Some ep when hotRow.IsNone && codeGen.FoldWrapper.IsNone && not codeGen.MpiSlab && codeGen.ShareDecl.IsNone
-                       && Map.isEmpty streamed && List.length codeGen.Bindings = 2
-                       && compactFlat.IsSome
-                       && not (pragmaLevel = Some 0 && ompLastLevel > 0) ->
-            Some ep
-        | Some ep ->
-            recordCodegenDecision "compact-row-classes" "" (Blade.Effects.Declined "the producer is not emitted by the plain compact row nest (sliced, streamed, fused-fold or collapsed form)") [ $"orbit fold of `{codeGen.OutputName}`" ]
-            ep.OnDeclined ()
-            None
-        | None -> None
-    match compactRow with
-    | Some ep -> for l in ep.Prelude do lines <- lines @ [ind depth + l]
-    | None -> ()
+    let (lines2, compactFlat, hotRow, cellStep, cellBlock, compactRow) =
+        planNestRowEpilogues codeGen streamed outRowDecl outRowName ompLastLevel pragmaLevel ind depth lines
+    lines <- lines2
     for binding in codeGen.Bindings do
         let levelIdx = bidx
         // Generate the loop header (pragma only on the outermost loop).
@@ -2374,73 +2784,13 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
         recordOmpConstruct codeGen.OutputName pragmaPrefix $"loop nest level {bidx} ({binding.IndexName})"
         // Mark a requested-but-suppressed pragma at the outer level so the
         // dropped clause is visible rather than silent (see ompSuppressedMarker).
-        let suppressedMarker =
-            if isOuter then
-                let reason =
-                    // The BUILD KNOB is reported FIRST when it is what declined:
-                    // with serial emission on, every other reason is unreachable
-                    // as an explanation (the nest would have been serial anyway),
-                    // and naming the knob is what tells a reader that the same
-                    // source built without it WOULD be threaded.
-                    if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
-                    elif codeGen.FoldWrapper.IsSome && codeGen.FoldOmpDecline.IsSome then
-                        codeGen.FoldOmpDecline.Value
-                    elif codeGen.FoldWrapper.IsSome then
-                        "fold accumulates into a shared scalar, which is not race-safe"
-                    elif nestKernelWrites then
-                        "the kernel may write storage outside itself (G41: a writing producer keeps an ordered loop)"
-                    elif codeGen.Bindings |> List.exists (fun b -> (domainPlanOfLevel b).IsSome) then
-                        "a closed-form domain nest carries one sequential cell counter and has no thread-level form yet"
-                    else "the omp(...) depth licenses no level of this nest"
-                // "Emitted" means the nest gets a pragma SOMEWHERE, not
-                // necessarily at this level -- an inner-licensed nest is
-                // parallelized and must not be reported as serial. A Path B
-                // fold nest counts as emitted: the parallel region is the
-                // prologue above, not a `for` pragma on any level.
-                // A MAP licence the fold turned into a chunk plan (bench gap
-                // G27) is reported by the FoldChunk lines below when the plan
-                // is dead, so it is excluded here -- one census line per drop.
-                ompSuppressedMarker (codeGen.OmpRequested && codeGen.FoldChunk.IsNone)
-                                    (pragmaLevel.IsSome || foldChunk.IsSome) reason (ind depth)
-                // A Path B fold nest requested omp through `FoldChunk`, not
-                // through `OmpRequested` (which the fold path leaves unset), so
-                // a knob-suppressed chunk plan would otherwise vanish without a
-                // trace. This is the census line for exactly that case.
-                @ (if codeGen.FoldChunk.IsSome && not (ompThreadEmissionEnabled ())
-                   then [ ind depth + $"// {(ompSuppressedPhrase (ompThreadsSuppressedReason ()))}" ]
-                   // The row-slot form SPENDS the request (a live team), so
-                   // a repro build that took it has no drop to report.
-                   elif codeGen.FoldChunk.IsSome && not (fpReassocEnabled ()) && not rowSlotsLive
-                   then [ ind depth + $"// {(ompSuppressedPhrase (fpReproReason ()))}" ]
-                   else [])
-            else []
+        let suppressedMarker = nestSuppressedMarker codeGen pragmaLevel nestKernelWrites foldChunk rowSlotsLive ind depth isOuter
         atOuterLevel <- false
         // MPI slab mode: the outermost level iterates this rank's slab
         // [__blade_mpi_lo_<out>, __blade_mpi_hi_<out>) -- bounds declared by
         // the slab prologue genApplyCombinator emitted before the nest.
         // Inner levels are untouched.
-        let header =
-            // A closed-form domain level is its own affine nest; it is never
-            // chunked (chunkable excludes it) and never MPI-sliced.
-            match domainPlanOfLevel binding with
-            | Some plan -> genDomainLoopHeader binding plan
-            | None ->
-            if isOuter && codeGen.MpiSlab then
-                sprintf "for (size_t %s = __blade_mpi_lo_%s; %s < __blade_mpi_hi_%s; %s++) {"
-                    binding.IndexName codeGen.OutputName
-                    binding.IndexName codeGen.OutputName
-                    binding.IndexName
-            // Path B: the outermost level iterates this thread's chunk
-            // [__rlo, __rhi) of [0, extent). Same substitution shape as the MPI
-            // slab above; inner levels are untouched, so a triangular inner nest
-            // runs exactly as it would serially for each outer index owned here.
-            elif isOuter && foldChunk.IsSome then
-                $"for (size_t {binding.IndexName} = __rlo; {binding.IndexName} < __rhi; {binding.IndexName}++) {{"
-            // B2r mini-blocks (epi_blk_r > 0): the cell loop walks the block
-            // [__cbk, __cbe) that the strip-mine loop opened just above it.
-            elif bidx = lastBindingIdx && cellBlock.IsSome then
-                $"for (size_t {binding.IndexName} = __cbk; {binding.IndexName} < __cbe; {binding.IndexName}++) {{"
-            else genForLoopHeader compoundArrays binding
+        let header = nestLevelHeader codeGen foldChunk compoundArrays lastBindingIdx cellBlock isOuter bidx binding
         // Output row hoist: just outside the innermost header, re-taken per
         // outer iteration. The
         // flat-pool plan replaces the skeleton walk with `pool + <closed-form
@@ -2531,58 +2881,14 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
                 ind depth + $"{{ int __tn = blade_omp_get_thread_num(); {covSeen}[__tn] = true; {covTeam}[__tn] = blade_omp_get_num_threads(); }}"
             ]
         bidx <- bidx + 1
-        
-        // Generate element bindings for all arrays at this level. Zipping an
-        // array WITH ITSELF puts two operand slots on the same (array, index):
-        // both peel to the byte-identical declaration, so an identical
-        // (name, code) pair is emitted once (the second slot's params resolve
-        // to the first slot's binding via paramFinalNames below); the second
-        // `double A____i0 = A[__i0];` was a g++ redeclaration error.
-        let mutable declaredNames : Map<string, string> = Map.empty
-        for elem in binding.Elements do
-            match Map.tryFind elem.ArrayName streamed with
-            | Some sspec ->
-                // Streamed source: no array to peel -- accumulate the site
-                // coordinate; at the fiber level this emits the provider
-                // read + the rank-1 wrapper the kernel body consumes.
-                let acc = Map.tryFind elem.ArrayPosition streamSites |> Option.defaultValue []
-                let (codeLines, fiberBound, acc') = genElementBindingStreamed binding elem sspec acc
-                streamSites <- Map.add elem.ArrayPosition acc' streamSites
-                for c in codeLines do
-                    lines <- lines @ [ind depth + c]
-                (match fiberBound with
-                 | Some fname ->
-                     currentNames <- Map.add elem.ArrayPosition fname currentNames
-                     paramFinalNames <- Map.add elem.ParamVarId fname paramFinalNames
-                 | None -> ())
-            | None ->
-                let currentName =
-                    Map.tryFind elem.ArrayPosition currentNames
-                    |> Option.defaultValue elem.ArrayName
-                let rawRow = Set.contains (levelIdx, elem.ArrayPosition) restrictSites
-                let (code, newName) =
-                    match windowReads |> Option.bind (fun p -> p.Peels |> List.tryFind (fun (e, _) -> obj.ReferenceEquals(e, elem))) with
-                    | Some (_, win) ->
-                        let newName = $"{currentName}__{binding.IndexName}"
-                        ($"{(elemTypeToCpp elem.ArrayElemType)} {newName} = {win}[static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo))];", newName)
-                    | None ->
-                        match bandPeels |> Option.bind (fun p -> p.OuterPeels |> List.tryFind (fun (e, _) -> obj.ReferenceEquals(e, elem))) with
-                        | Some (_, win) ->
-                            let newName = $"{currentName}__{binding.IndexName}"
-                            let columns = bandPeels.Value.Columns
-                            ($"double* BLADE_RESTRICT {newName} = {win} + static_cast<size_t>(static_cast<int64_t>({binding.IndexName}) - static_cast<int64_t>(__w_lo)) * {columns}UL;", newName)
-                        | None -> genElementBindingPeel rawRow binding elem currentName
-                if Map.tryFind newName declaredNames <> Some code then
-                    lines <- lines @ [ind depth + code]
-                declaredNames <- Map.add newName code declaredNames
-                currentNames <- Map.add elem.ArrayPosition newName currentNames
-                // Record mapping for kernel body
-                match elem.Virtual with
-                | VirtualRange _ | VirtualReverse ->
-                    paramFinalNames <- Map.add elem.ParamVarId elem.ParamName paramFinalNames
-                | RealArray ->
-                    paramFinalNames <- Map.add elem.ParamVarId newName paramFinalNames
-    
+
+        let (lines3, currentNames3, paramFinalNames3, streamSites3) =
+            genNestLevelPeels streamed windowReads bandPeels restrictSites ind depth levelIdx binding lines currentNames paramFinalNames streamSites
+        lines <- lines3
+        currentNames <- currentNames3
+        paramFinalNames <- paramFinalNames3
+        streamSites <- streamSites3
+
     match bandPeels with
     | Some p when paramFinalNames <> p.FinalParams ->
         invalidOp "rank-two band certificate did not consume every final scalar peel"
@@ -2598,252 +2904,17 @@ let private genLoopNestStreamedCore (windowReads: Rank1WindowReads option) (band
     // same precedence rule as `captureForwardName`.
     let nameMap =
         withCaptureNames EnclosingNamesWin codeGen.Captures nameMap
-    
-    // Generate kernel assignment (with Reynolds permutation sum if applicable).
-    // The shape of the assignment depends on output type:
-    //   - Array output: indexed slot assignment, `name[i][j]... = kernelBody;`.
-    //     Each loop binding contributes one bracketed index. This is the standard
-    //     case for `method_for(...) <@> kernel` returning a tensor.
-    //   - Scalar output: sum accumulation, `name += kernelBody;`. The loop nest
-    //     still iterates over input dimensions, but the kernel result is summed
-    //     into a scalar accumulator declared by the caller (genApplyCombinator).
-    //     Used when the function's return type is scalar even though the
-    //     `<@>` kernel produces a per-iteration value (the Cartesian-sum-reduce
-    //     pattern).
-    let outputIdx =
-        match codeGen.OutputType with
-        | IRTScalar _ -> ""
-        // Tabulated (compound/sparse) output inherits the input's index: write
-        // into the compact buffer (.data[r*stride + t]), not a dense [i][j] slot.
-        | ArrayElem at when isCompoundArrayType at || isSparseArrayType at ->
-            compoundOutputSubscript codeGen.Bindings codeGen.OutputName
-        | _ ->
-            codeGen.Bindings
-            |> List.map (fun b -> $"[{b.IndexName}]")
-            |> String.concat ""
-    let assignOp =
-        match codeGen.OutputType with
-        | IRTScalar _ -> "+="
-        | _ -> "="
 
-    // LAZY, because rendering is not free of side effects: `exprToCpp`'s
-    // refusal path appends to the expression-sentinel cell (which becomes an
-    // `#error` in the translation unit) whether or not the caller keeps the
-    // string. The literal-row arm below discards this value, and an eagerly
-    // rendered array-literal body left a spurious `#error` behind in an
-    // otherwise perfectly good program.
-    let reynoldsResult =
-        lazy (
-            match windowReads with
-            | Some p ->
-                let subst =
-                    p.Reads |> List.map (fun (node, w, offset, win) ->
-                        let center = exprToCpp nameMap w
-                        node, $"{win}[static_cast<size_t>((static_cast<int64_t>({center}) + ({offset}LL)) - static_cast<int64_t>(__w_lo))]")
-                { CppExpr = exprToCppWithSubst subst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
-            | None -> genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
-    if codeGen.HasReynolds && reynoldsResult.Value.UniqueTerms < reynoldsResult.Value.TotalPerms then
-        lines <- lines @ [ind depth + $"// Reynolds: {reynoldsResult.Value.UniqueTerms}/{reynoldsResult.Value.TotalPerms} perms unique (dedup {reynoldsResult.Value.TotalPerms / max 1 reynoldsResult.Value.UniqueTerms}x)"]
-    // When the output row was hoisted, the write goes through the
-    // restrict-qualified row pointer and only the innermost subscript remains.
-    let (writeTarget, writeIdx) =
-        match outRowDecl with
-        | Some _ -> (outRowName, $"[{(List.last codeGen.Bindings).IndexName}]")
-        | None -> (codeGen.OutputName, outputIdx)
-    // ARRAY-VALUED KERNEL RETURN (stage S3, manifestation M-C1). When the
-    // kernel returns an array, the output type carries the kernel's
-    // T-dimensions after the iterated ones, so `arrayRank > nest depth` and the
-    // per-iteration product is a whole ROW, not a cell. `out[i] = <call>` (what
-    // the pre-S3 emitter wrote) assigns an `Array<T,m>` wrapper into a slot the
-    // C++ side types as a scalar or a row pointer -- the shape that compiled,
-    // ran, and printed `[[], []]`.
-    //
-    // Instead: evaluate the row once, copy its pool into the output pool at the
-    // row's offset, and free it when the callee owned it. The destination is
-    // computed from `<name>_extents` -- the SAME table the allocation used, now
-    // carrying the trailing T-dims -- rather than from a chained `out[i][j]`
-    // subscript, so it is one formula for any inner rank and needs nothing from
-    // the wrapper's operator[] typing.
-    //
-    // Gated to DENSE rectangular outputs: the flat row-major offset below is
-    // exact only when no axis is packed. A symmetric/compound/sparse output
-    // with an array-valued kernel falls through to the old cell assignment,
-    // which the C++ compiler then rejects -- loud, and out of scope here.
-    //
-    // FREEING is conditional on `freshReturnOf`. A kernel that CONSTRUCTS its
-    // row (the S2 call form over a materializing body) hands back storage this
-    // call allocated, so not freeing it leaks one row per outer cell. A kernel
-    // that PASSES ITS INPUT ROW THROUGH (`lambda(r) -> r`) hands back a view of
-    // the operand -- freeing that would destroy the input. `NotFresh` (which is
-    // also what an unresolvable callee reads as) leaks rather than guesses,
-    // matching the surrounding block's rule 3.
-    let rowWriteLines : string list option =
-        match codeGen.OutputType with
-        | ArrayElem at when codeGen.FoldWrapper.IsNone
-                            && not (isCompoundArrayType at)
-                            && not (isSparseArrayType at)
-                            && not (hasRealSymmetry codeGen.OutputSymmVec)
-                            && not (List.isEmpty codeGen.Bindings)
-                            && arrayRank at > List.length codeGen.Bindings ->
-            let rank = arrayRank at
-            let outer = List.length codeGen.Bindings
-            let extentsName = $"{codeGen.OutputName}_extents"
-            let elemStr = elemTypeToCpp at.ElemType
-            let innerCells =
-                [ outer .. rank - 1 ] |> List.map (sprintf "%s[%d]" extentsName) |> String.concat " * "
-            // Row-major flattening of the OUTER indices (inner indices are 0):
-            // (((i0) * e1 + i1) * e2 + i2) ...
-            let flatOuter =
-                codeGen.Bindings
-                |> List.mapi (fun i b -> (i, b.IndexName))
-                |> List.fold (fun acc (i, nm) ->
-                        if i = 0 then nm
-                        else $"({acc}) * {extentsName}[{i}] + {nm}") ""
-            let freeLine =
-                let callee = match codeGen.KernelExpr with IRApp (f, _, _) -> Some f | _ -> None
-                match callee with
-                | Some f when freshReturnOf f = FreshPool ->
-                    [ $"    deallocate<typename promote<{elemStr}, {(rank - outer)}>::type, nullptr>(__rowv.data, __rowv.extents);" ]
-                | _ -> []
-            // Literal row: store the cells directly, no temporary. Reynolds is
-            // excluded -- symmetrizing a body means SUMMING its permuted
-            // copies, and a per-cell sum of array literals is not what the
-            // stores below write; that shape falls through to the generic arm.
-            //
-            // A BLOCK-bodied literal kernel -- scalar lets ahead of the array
-            // literal (`lambda(w) -> { let x = ...; [x + y, x - y] }`, the
-            // halo/segment shape) -- takes the same direct-store path: the
-            // lets render as statements inside the row-write scope, visible
-            // to the leaf stores. The shape check is PURE (no rendering), so
-            // a declined shape leaves no sentinel side effect behind.
-            let rec literalTailOf e = match e with IRLet (_, _, b) -> literalTailOf b | t -> t
-            let literalLeaves =
-                match literalTailOf codeGen.KernelExpr with
-                | IRArrayLit _ as tail when not codeGen.HasReynolds ->
-                    match arrayLitScalarLeaves tail,
-                          staticCellsOfAxes at outer (rank - 1) with
-                    // Leaf count MUST equal the destination row's cell count:
-                    // the output extents are deduced from the literal's shape,
-                    // so a disagreement means the deduction and the body have
-                    // drifted apart, and writing anyway would run off the row.
-                    | Some leaves, Some cells when leaves.Length = cells -> Some leaves
-                    | _ -> None
-                | _ -> None
-            match literalLeaves with
-            | Some leaves ->
-                let subst = emptySubst
-                // Render the let prefix (empty for a bare literal body): each
-                // non-unit value becomes a scoped local named __v<id> --
-                // renderLetExpr's convention, so the leaves' IRVar references
-                // resolve -- and unit values keep their statement form.
-                let rec renderLetPrefix nm acc e =
-                    match e with
-                    | IRLet (lid, v, b) ->
-                        let nm' = Map.add lid ((localVarName lid)) nm
-                        let lines =
-                            if isUnitExpr v then
-                                match renderUnitStmts subst nm v with
-                                | "" -> []
-                                | s -> [$"    {s}"]
-                            else [$"    auto {(localVarName lid)} = {(exprToCppCore subst nm v)};"]
-                        renderLetPrefix nm' (acc @ lines) b
-                    | _ -> (nm, acc)
-                let (leafMap, letLines) = renderLetPrefix nameMap [] codeGen.KernelExpr
-                Some ([
-                        "{"
-                      ] @ letLines @ [
-                        $"    const size_t __rowc = (size_t)({innerCells});"
-                        $"    {elemStr}* __rowd = nested_array_utilities::pool_base({codeGen.OutputName}.data) + (({flatOuter}) * __rowc);"
-                      ] @ (leaves |> List.mapi (fun k leaf ->
-                                $"    __rowd[{k}] = {(exprToCppCore subst leafMap leaf)};"))
-                        @ [ "}" ])
-            | None ->
-            Some ([
-                    "{"
-                    $"    auto __rowv = {reynoldsResult.Value.CppExpr};"
-                    $"    const {elemStr}* __rows = nested_array_utilities::pool_base(__rowv.data);"
-                    $"    const size_t __rowc = (size_t)({innerCells});"
-                    $"    {elemStr}* __rowd = nested_array_utilities::pool_base({codeGen.OutputName}.data) + (({flatOuter}) * __rowc);"
-                    "    for (size_t __rk = 0; __rk < __rowc; __rk++) __rowd[__rk] = __rows[__rk];"
-                  ] @ freeLine @ [ "}" ])
-        | _ -> None
-    // Lazy for `reynoldsResult`'s reason: `rowWriteLines`, when it fires, is
-    // the whole write, and rendering this line anyway would re-enter the
-    // kernel expression -- and its sentinel side effect -- for nothing.
-    let assignLine = lazy (
-        match codeGen.FoldWrapper, foldChunk with
-        // Path B: accumulate into the THREAD-PRIVATE scalar, seeding it
-        // from the chunk's first contributed value. The cell value is bound once
-        // (the kernel expression can be a large Reynolds sum) and the branch is
-        // loop-invariant after the first iteration.
-        | Some wname, Some plan ->
-            match plan.ChunkForm with
-            // G35: the row's complete value into its own slot, indexed by the
-            // outer level's loop counter (the nest is one level: the row
-            // kernel's body is the whole fold, rendered as it is serially).
-            | ChunkRowSlots _ ->
-                $"{fcSlot}[{(List.head codeGen.Bindings).IndexName}] = {reynoldsResult.Value.CppExpr};"
-            // ChunkSimd: the reduction statement in the `x = x op expr` shape
-            // the clause requires, into the identity-seeded private copy.
-            | ChunkSimd op -> $"{foldAccName} = {foldAccName} {op} {reynoldsResult.Value.CppExpr};"
-            | ChunkSerial _ ->
-            sprintf "{ %s __rv = %s; if (%s) %s = %s(%s, __rv); else { %s = __rv; %s = true; } }"
-                plan.ElemCpp reynoldsResult.Value.CppExpr
-                fcHas foldAccName wname foldAccName
-                foldAccName fcHas
-        // Fused fold: accumulate the kernel value through the fold-kernel
-        // wrapper into the caller-declared scalar accumulator.
-        | Some wname, None -> $"{codeGen.OutputName} = {wname}({codeGen.OutputName}, {reynoldsResult.Value.CppExpr});"
-        | None, _ ->
-            match cellStep with
-            // B2r register-consume: the cell bound once (its own element
-            // type), stored, then handed to the row's chain.
-            | Some step ->
-                let cellElem = match codeGen.OutputType with ArrayElem at -> elemTypeToCpp at.ElemType | _ -> "double"
-                let stepText = step "__c"
-                $"{{ const {cellElem} __c = {reynoldsResult.Value.CppExpr}; {writeTarget}{writeIdx} {assignOp} __c; {stepText} }}"
-            | None -> $"{writeTarget}{writeIdx} {assignOp} {reynoldsResult.Value.CppExpr};")
-    match rowWriteLines with
-    | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
-    | None -> lines <- lines @ [ind depth + assignLine.Value]
+    lines <- genNestKernelWrite windowReads codeGen nameMap paramFinalNames outRowDecl outRowName foldChunk fcSlot foldAccName fcHas cellStep ind depth lines
 
     // Close all loops. Under the hot-row schedule the inner levels close
     // first, the row's fold runs on the just-completed slice inside the
     // outermost loop, then the outermost level closes.
     match hotRow with
     | Some ep ->
-        for _ in List.tail codeGen.Bindings do
-            depth <- depth - 1
-            lines <- lines @ [ind depth + "}"]
-        // B2r mini-blocks: close the strip-mine loop around the cell loop.
-        if cellBlock.IsSome then
-            depth <- depth - 1
-            lines <- lines @ [ind depth + "}"]
-        let (elemStr, rank) =
-            match codeGen.OutputType with
-            | ArrayElem at -> (elemTypeToCpp at.ElemType, arrayRank at)
-            | _ -> ("double", 2)
-        let outerIdx = (List.head codeGen.Bindings).IndexName
-        // Rank 2: the slice IS the hoisted output row, read through the
-        // restrict pointer it was written through (any other access path to a
-        // row written through a restrict pointer in the same scope would
-        // violate the qualifier's contract). Rank >= 3: the slice is the
-        // skeleton's leading entry, and the row pointer's scope (the level
-        // r-2 body) has already closed.
-        let viewData = if rank = 2 then outRowName else $"{codeGen.OutputName}.data[{outerIdx}]"
-        lines <- lines @ [ ind depth + "{"
-                           ind depth + $"    Array<{elemStr}, {rank - 1}> {ep.RowViewName} = {{ {viewData}, {codeGen.OutputName}.extents + 1 }};" ]
-        let epBody = if cellStep.IsSome then ep.ChainBody () else ep.Body ()
-        for l in epBody do lines <- lines @ [ind depth + "    " + l]
-        if cellStep.IsSome then
-            let blocks = match cellBlock with Some r -> $"mini-blocks of {r}" | None -> "one fused loop"
-            Blade.Optimize.recordCellEpilogue ep.Subject Blade.Effects.Applied
-                [ $"row chain interleave ({blocks}): each row's prodsum(row, row) chain advances on each cell right behind its store (register-consume) into `{ep.ChainName}`, stored as the row's value"
-                  "strict-legal: the same products of the same stored values added in the same ascending order to the same +0; the outer combine is unchanged" ]
-        lines <- lines @ [ ind depth + "}" ]
-        depth <- depth - 1
-        lines <- lines @ [ind depth + "}"]
-        ep.OnEmitted ()
+        let (lines4, depth4) = closeNestHotRow codeGen cellStep cellBlock outRowName ind ep lines depth
+        lines <- lines4
+        depth <- depth4
     | None ->
         match compactRow with
         | Some ep ->
@@ -3558,18 +3629,18 @@ let internal siblingMemberGate (g: Blade.Optimize.SiblingMapGroup) (j: int) (ope
     if cg.RowEpilogue.IsSome || cg.CompactRowEpilogue.IsSome then Error "a row epilogue rides this member's nest"
     else
     match g.Kind with
-    | Blade.Optimize.SibFlat cells ->
+    | Blade.Optimize.SiblingMapKind.SibFlat cells ->
         if cg.FlatEpilogue.IsSome then Error "a cell epilogue rides this member's flat sweep"
         else
         match flatElementwisePlanOf Map.empty operandTypes cg names indent with
         | Some fp when fp.Cells = cells && fp.AllDense && not fp.ProducerWrites -> Ok ()
         | Some _ -> Error "the member's flat sweep differs from the group's (cells, storage or a writing kernel)"
         | None -> Error "the member does not take the flat elementwise path"
-    | Blade.Optimize.SibHalo _ ->
+    | Blade.Optimize.SiblingMapKind.SibHalo _ ->
         match siblingHaloLevel cg (List.item j g.Starts) (List.item j g.Extents) with
         | Some _ -> Ok ()
         | None -> Error "the member's nest is not the planned single-level halo walk"
-    | Blade.Optimize.SibHaloStream _ ->
+    | Blade.Optimize.SiblingMapKind.SibHaloStream _ ->
         // realized at the segment run loop (siblingSegHook), never at the nest slot
         Ok ()
 
@@ -3586,7 +3657,7 @@ let internal siblingFusedLoop (g: Blade.Optimize.SiblingMapGroup) (members: SibS
     let indent = (List.last members).SIndent
     let k = members.Length
     match g.Kind with
-    | Blade.Optimize.SibFlat cells ->
+    | Blade.Optimize.SiblingMapKind.SibFlat cells ->
         let fps = members |> List.map (fun s -> (s, (flatElementwisePlanOf Map.empty s.SOperandTypes s.SCodeGen s.SNames s.SIndent).Value))
         let (_, fp0) = List.head fps
         let distinct (xs: string list) = xs |> List.distinct
@@ -3604,7 +3675,7 @@ let internal siblingFusedLoop (g: Blade.Optimize.SiblingMapGroup) (members: SibS
         @ (fps |> List.map (fun (_, fp) -> ind (indent + 2) + $"{fp.OutPool}[__fk] = {fp.Body};"))
         @ [ ind (indent + 1) + "}"
             ind indent + "}" ]
-    | Blade.Optimize.SibHalo (inner, baseN) ->
+    | Blade.Optimize.SiblingMapKind.SibHalo (inner, baseN) ->
         // per member: its level, its first centre and extent, its block body
         let blocks =
             members |> List.mapi (fun j s ->
@@ -3648,7 +3719,7 @@ let internal siblingFusedLoop (g: Blade.Optimize.SiblingMapGroup) (members: SibS
                 @ (active |> List.collect (fun (_, _, _, render) -> render (indent + 1)))
                 @ [ ind indent + "}" ]))
         |> fun ls -> ignore b0; ls
-    | Blade.Optimize.SibHaloStream _ ->
+    | Blade.Optimize.SiblingMapKind.SibHaloStream _ ->
         invalidOp "sibling-maps: a streamed halo group is realized at the segment run loop, not the nest slot"
 
 /// The hook at genApplyCombinator's loop slot.
@@ -3663,7 +3734,7 @@ let internal siblingLoopHook (name: string) (routeFree: bool) (streamed: Map<str
     | false, _ -> SibNormal
     | true, (gid, j) ->
     match (siblingEmissionCell ()).TryGetValue gid with
-    | true, st when (match st.Group.Kind with Blade.Optimize.SibHaloStream _ -> true | _ -> false) ->
+    | true, st when (match st.Group.Kind with Blade.Optimize.SiblingMapKind.SibHaloStream _ -> true | _ -> false) ->
         // a streamed halo group is realized at the SEGMENT run loop
         // (siblingSegHook): the nest slot is the member's ordinary per-run loop
         SibNormal
@@ -3690,9 +3761,9 @@ let internal siblingLoopHook (name: string) (routeFree: bool) (streamed: Map<str
             let lines = siblingFusedLoop g (st.Stash @ [ me ])
             Blade.Optimize.recordSiblingMaps subject Blade.Effects.Applied
                 [ (match g.Kind with
-                   | Blade.Optimize.SibFlat _ -> $"C++ lane: one flat sweep writes {g.Members.Length} outputs"
-                   | Blade.Optimize.SibHalo _ -> $"C++ lane: one halo walk writes {g.Members.Length} outputs, peeled by member domain"
-                   | Blade.Optimize.SibHaloStream _ -> "C++ lane: (unreachable: a streamed group is realized at the segment run loop)")
+                   | Blade.Optimize.SiblingMapKind.SibFlat _ -> $"C++ lane: one flat sweep writes {g.Members.Length} outputs"
+                   | Blade.Optimize.SiblingMapKind.SibHalo _ -> $"C++ lane: one halo walk writes {g.Members.Length} outputs, peeled by member domain"
+                   | Blade.Optimize.SiblingMapKind.SibHaloStream _ -> "C++ lane: (unreachable: a streamed group is realized at the segment run loop)")
                   "each member's prechecks, allocation and registrations stayed at its own site" ]
             SibReplace lines
     | _ -> SibNormal
@@ -3752,7 +3823,7 @@ let internal siblingSegHook (name: string) (certified: Result<string, string>) (
     | false, _ -> SegNormal
     | true, (gid, j) ->
     match (siblingEmissionCell ()).TryGetValue gid with
-    | true, st when st.Committed && not st.Completed && (match st.Group.Kind with Blade.Optimize.SibHaloStream _ -> true | _ -> false) ->
+    | true, st when st.Committed && not st.Completed && (match st.Group.Kind with Blade.Optimize.SiblingMapKind.SibHaloStream _ -> true | _ -> false) ->
         let g = st.Group
         let subject = siblingSubject g
         let flush why =
@@ -3785,7 +3856,7 @@ let internal siblingPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit,
     if ompTestModeEnabled () then Error "omp test mode instruments the single nests"
     else
     match g.Kind with
-    | Blade.Optimize.SibHaloStream _ -> Ok () // certified per member at the segment run loop
+    | Blade.Optimize.SiblingMapKind.SibHaloStream _ -> Ok () // certified per member at the segment run loop
     | _ ->
     let built =
         g.Applies |> List.mapi (fun j info ->
@@ -3799,19 +3870,19 @@ let internal siblingPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit,
     | Some why -> Error why
     | None ->
     match g.Kind with
-    | Blade.Optimize.SibFlat _ ->
+    | Blade.Optimize.SiblingMapKind.SibFlat _ ->
         let pragmas =
             built |> List.map (fun (_, info, cg) ->
                 (flatElementwisePlanOf Map.empty info.ArrayTypes cg Map.empty 0) |> Option.map (fun fp -> fp.Pragma))
         if (pragmas |> List.distinct |> List.length) > 1 then Error "the members' flat sweeps take different pragmas"
         else Ok ()
-    | Blade.Optimize.SibHalo _ ->
+    | Blade.Optimize.SiblingMapKind.SibHalo _ ->
         // one team for the shared segment: every member's own nest must take
         // the SAME pragma (a member whose depth licenses no level stays serial)
         let pragmas = built |> List.map (fun (_, _, cg) -> genNestPragma cg.Bindings "")
         if (pragmas |> List.distinct |> List.length) > 1 then Error "the members' halo walks take different pragmas"
         else Ok ()
-    | Blade.Optimize.SibHaloStream _ -> Ok ()
+    | Blade.Optimize.SiblingMapKind.SibHaloStream _ -> Ok ()
 
 /// --- Row-fold jam (unroll-and-jam over the row axis) ------------------------
 /// The partial fold `reduce(A, op[, init])` (TypeCheck's partialFold desugars it

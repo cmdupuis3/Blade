@@ -296,19 +296,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         when at.IndexTypes.Length = 1 && not elems.IsEmpty
              && (match stripUnits at.ElemType with IRTScalar (ETInt64 | ETInt32 | ETFloat64 | ETFloat32) -> true | _ -> false)
              && elems |> List.forall (function IRLit (IRLitInt _) | IRLit (IRLitFloat _) -> true | _ -> false) ->
-        let pStr = exprToCppCore subst names p
-        // An integer table is the per-type static `key_table` (one
-        // instantiation per distinct key list, program-wide); a float table
-        // reads a constant std::array, which g++ folds into read-only data.
-        // Neither spelling is call-shaped, so the frame-elision scan
-        // (CodeGen.scanBodyCalls) is unaffected.
-        if elems |> List.forall (function IRLit (IRLitInt _) -> true | _ -> false) then
-            let ks = elems |> List.map (function IRLit (IRLitInt k) -> $"{k}LL" | _ -> "0LL") |> String.concat ", "
-            $"blade_arith::key_table<{ks}>::tab[{pStr}]"
-        else
-            let elemStr = elemTypeToCpp at.ElemType
-            let cells = elems |> List.map (exprToCppCore subst names) |> String.concat ", "
-            $"std::array<{elemStr}, {elems.Length}>{{{{ {cells} }}}}[{pStr}]"
+        renderLiteralTableRead subst names elems at p
     | ExprShape (children, rebuild)
         when children |> List.exists (function GatherTeardown _ -> true | _ -> false)
              && (match expr with IRProdSum _ -> false | _ -> true)
@@ -317,50 +305,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                  | _ -> false) ->
         bindInlineGathers subst names (exprMayRetain expr) children (fun cs -> exprToCppCore subst names (rebuild cs))
     | IRVar (id, _) ->
-        // A reference to a lifted callable WITH captures cannot stand bare
-        // in value position: the lifted C++ function carries trailing
-        // capture params, so the bare name neither converts to a
-        // std::function of the surface arity nor direct-calls correctly.
-        // Close the captures with an inline forwarding closure -- the same
-        // [&]-by-name chain as genCallableWrapper/genVarAliasBinding, valid
-        // in any scope where the captured locals are visible (i.e. wherever
-        // the lambda literal / partial application appeared). Capture-free
-        // callables keep the bare name (a plain function converts fine).
-        // The closure is a VALUE that may outlive this frame (returned,
-        // stored in a tuple, passed on), so it copies its captures unless
-        // one is rebound (closureValueCapture).
-        // The `callable.Id = id` guard matters: resolveCallable also sees
-        // THROUGH let-aliases, but an alias var is already a std::function
-        // of the surface arity with captures closed (genVarAliasBinding) --
-        // render it by name; only the direct lifted-callable reference
-        // needs the closure.
-        match resolveCallable expr with
-        | Some callable when callable.Id = id && not (List.isEmpty callable.Captures) ->
-            let safeName = sanitizeCppName callable.Name
-            let paramSig =
-                callable.Params
-                |> List.map (fun p ->
-                    match p.Type with
-                    | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
-                    | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
-                |> String.concat ", "
-            let allArgs =
-                (callable.Params |> List.map (_.Name))
-                @ (captureForwardArgs names callable.Captures)
-                |> String.concat ", "
-            let (clause, spec) = closureValueCapture callable.Captures
-            $$"""{{clause}}({{paramSig}}){{spec}} { return {{safeName}}({{allArgs}}); }"""
-        | _ ->
-            match Map.tryFind id names with
-            | Some name ->
-                // A `.stream` binding read as a VALUE outside a scope that
-                // materializes it: render the deferred refusal sentinel, not
-                // a name no C++ declaration carries (CodeGenState, "STREAMED
-                // VALUES NEVER REACH C++").
-                (match streamedValueSentinel id name with
-                 | Some sentinel -> sentinel
-                 | None -> name)
-            | None -> (localVarName id)
+        renderVarExpr subst names expr id
     | IRParam (name, _, _) -> Blade.Types.TypeOrigins.cppName name
     | IRHaloUnhash (w, off) ->
         // halo window read over a masked domain: coordinate of the present
@@ -374,28 +319,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let wS = exprToCppCore subst names w
         $"{wS}[({(int64LiteralToCpp (int64 off))})][0]"
     | IRBinOp (_, op, l, r, loc) ->
-        let render (lStr: string) (rStr: string) =
-            match renderContractBinOp op l r lStr rStr inferExprType loc, op with
-            | Some s, _ -> s
-            | None, IRCaret -> $"pow({lStr}, {rStr})"
-            | None, IRMath2 name -> renderMath2 name lStr rStr
-            | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
-        // BIND ONCE (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M2): the SAME
-        // canonicalizing compact read on both sides (`t(i, j, k) * t(i, j, k)`)
-        // is evaluated once into a local and the operator applied to it --
-        // one fold and one fetch instead of two. Pure read, same cell, same
-        // operator on the same two values: no value or order changes.
-        if l = r && isBindOnceCompactRead inferExprType l then
-            let once = exprToCppCore subst names l
-            let applied = render "__bo" "__bo"
-            $"([&]() {{ const auto __bo = {once}; return {applied}; }}())"
-        else
-        // A bare integer literal beside an Int32 renders as an `int`
-        // (int32AdaptedLiterals: the 32-bit width on every data model).
-        let (la, ra) = int32AdaptedLiterals inferExprType l r
-        let lStr = match l with IRLit (IRLitInt n) when la -> int32LiteralToCpp n | _ -> exprToCppCore subst names l
-        let rStr = match r with IRLit (IRLitInt n) when ra -> int32LiteralToCpp n | _ -> exprToCppCore subst names r
-        render lStr rStr
+        renderBinOpExpr subst names op l r loc
     | IRUnaryOp (IRConj, e) ->
         // conj is std::conj/thrust::conj on complex operands; the identity on
         // reals (mathematically conj(x)=x for real x, and std::conj(double)
@@ -433,43 +357,9 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         renderOrderedCall [ re; im ] ([ re; im ] |> List.map (exprToCppCore subst names))
             (fun ps -> $"{cppType}({ps.[0]}, {ps.[1]})")
     | IRTupleProj _ when (flatTupleProjection expr).IsSome ->
-        // Gap G42: the chain is rooted at a binding held as a FLAT C++ tuple
-        // under a left-nested IR type. Render by flat leaf position.
-        let (root, offset, sub) = (flatTupleProjection expr).Value
-        let rootStr = exprToCppCore subst names root
-        let rec build (ty: IRType) (k: int) : string * int =
-            match IR.stripUnits ty with
-            | IRTTuple ts ->
-                let (parts, k') =
-                    ts |> List.fold (fun (acc, k) t ->
-                        let (s, k') = build t k
-                        (acc @ [s], k')) ([], k)
-                ($"""std::make_tuple({(parts |> String.concat ", ")})""", k')
-            | _ -> ($"std::get<{k}>({rootStr})", k + 1)
-        fst (build sub offset)
+        renderFlatTupleProj subst names expr
     | IRTupleProj (e, i, isFlat) ->
-        if not isFlat then
-            $"std::get<{i}>({(exprToCppCore subst names e)})"
-        else
-            // Flat projection into potentially nested tuple -- compute navigation path
-            let parentTy = inferExprType e
-            let rec findPath (ty: IRType) (targetFlat: int) : int list =
-                match ty with
-                | IRTTuple ts ->
-                    let mutable offset = 0
-                    let mutable found = None
-                    for idx in 0 .. ts.Length - 1 do
-                        if found.IsNone then
-                            let count = IR.flattenTupleLeaves ts.[idx] |> List.length
-                            if targetFlat < offset + count then
-                                match ts.[idx] with
-                                | IRTTuple _ -> found <- Some (idx :: findPath ts.[idx] (targetFlat - offset))
-                                | _ -> found <- Some [idx]
-                            offset <- offset + count
-                    found |> Option.defaultValue [i]
-                | _ -> [i]
-            let path = findPath parentTy i
-            path |> List.fold (fun acc idx -> $"std::get<{idx}>({acc})") (exprToCppCore subst names e)
+        renderTupleProjExpr subst names e i isFlat
     | IRFieldAccess (obj, field) ->
         $"{(exprToCppCore subst names obj)}.{field}"
     | IRStructLit (typeName, fields) ->
@@ -487,48 +377,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
          | Some local -> local
          | None -> renderIndexExpr subst names arr indices)
     | IRApp (func, args, _) ->
-        // Function signatures take Array<T,N> / Ragged<T> wrappers
-        // natively, one argument per Blade param. Array args pass through
-        // as-is (the wrapper carries its own shape via .extents/.lens/
-        // .offsets); no companion-arg synthesis. Non-array args render
-        // through exprToCpp normally.
-        // A callee that IS a lifted callable with captures (direct
-        // reference, not a let-alias: resolveCallable sees through aliases,
-        // but an alias var is already a std::function with captures closed
-        // -- call that by name) is called directly with the capture args
-        // appended, since the lifted signature is regular params + capture
-        // params.
-        // A `group_by` RESULT as an argument to a callable is refused, not
-        // rendered. Its C++ value is a row-pointer table (`Array<T*, 1>`) whose
-        // row lengths live in the producing group_keys' side state
-        // (`gk__ngroups` / `gk__offsets`), and no function signature carries
-        // that state: the callee's parameter renders as a dense `Array<T, 2>`,
-        // so the call was a g++ type error (and the callee's peels could not
-        // resolve a row length anyway). Capturing the grouped array in a
-        // lambda IS supported (the capture forwards the sidecar); passing it
-        // as an argument is not. The interpreter declines the same shape
-        // (Interp/Core.fs evalApp), so neither lane gives it a meaning.
-        let groupedArg =
-            args |> List.exists (fun a ->
-                match inferExprType a with
-                | ArrayElem at -> Blade.TypeLower.isGroupedRaggedShape at.IndexTypes
-                | _ -> false)
-        if groupedArg && (resolveCallable func).IsSome then
-            exprError "a group_by result cannot be passed as a function argument (its row lengths live in the group_keys side state, which no function signature carries) -- group inside the function from the values and keys, or capture the grouped array in a lambda instead"
-        else
-        let funcStr, captureArgs =
-            match func, resolveCallable func with
-            | IRVar (fid, _), Some callable when callable.Id = fid && not (List.isEmpty callable.Captures) ->
-                (sanitizeCppName callable.Name,
-                 captureForwardArgs names callable.Captures)
-            | _ -> (exprToCppCore subst names func, [])
-        let argStrs =
-            args |> List.collect (fun a ->
-                let argStr = exprToCppCore subst names a
-                match a, inferExprType a with
-                | (IRVar _ | IRParam _), ArrayElem _ -> [argStr]
-                | _ -> [argStr])
-        $"""{funcStr}({(argStrs @ captureArgs |> String.concat ", ")})"""
+        renderAppExpr subst names func args
     | IRBeginPoolScope _ | IRReleasePools _ ->
         exprError "inline lifetime event requires a statement renderer (retained inline must be declined)"
     | IRLet (id, value, body) ->
@@ -559,232 +408,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         renderReduceExpr subst names arrExpr kernelExpr initExpr
     | IRProdSum args ->
-        // G249: THE CO-ITERATION EXTENT GUARD of prodsum (BL8011). The walk
-        // below is bounded by the FIRST operand; an operand whose extent is
-        // known only at run time (a row of a run-time-shaped array, a
-        // `|> compute` over `0..extents(c)`) used to be read past its end.
-        // Every later operand is compared with the first once, before the
-        // first product, unless both extents are the same literal.
-        // G265 (a): an operand EXPRESSION (a row view `A(0)`, a call) is bound
-        // ONCE PER OCCURRENCE, in operand order, to an `auto&&` alias before
-        // the guard (never shared by spelling: two equal texts may be two
-        // calls of a writing function -- Codex design review), so the guard
-        // and every fold form below read plain names.
-        let isPlainOperand (s: string) =
-            s.Length > 0
-            && (System.Char.IsLetter s.[0] || s.[0] = '_')
-            && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
-        let rawStrs = args |> List.map (exprToCppCore subst names)
-        // (a UNARY prodsum too: its serial form re-spells the operand per
-        // element; and a partial sparse read -- an inline GATHER -- is bound
-        // the same way, in its operand position, and freed after the fold:
-        // Codex diff review of G265)
-        let gatherOf (e: IRExpr) = match e with GatherTeardown r -> Some r | _ -> None
-        let operandBinds =
-            List.zip args rawStrs |> List.mapi (fun i (e, s) ->
-                if isPlainOperand s then None else Some ($"__pg{i}", s, gatherOf e)) |> List.choose id
-        let opStrs =
-            rawStrs |> List.mapi (fun i s -> if isPlainOperand s then s else $"__pg{i}")
-        let prodGuard =
-            let strs = opStrs
-            if args.Length < 2 || not (strs |> List.forall isPlainOperand) then ""
-            else
-            let boundOf (e: IRExpr) (s: string) =
-                match inferExprType e with
-                | ArrayElem a when isRaggedRowType a -> (None, $"{s}.len")
-                | ArrayElem a when arrayRank a >= 1 && not (isCompoundArrayType a) && not (isSparseArrayType a) ->
-                    (literalExtentOfArray a 0, $"{s}.extents[0]")
-                | _ -> (None, "")
-            // a FUNCTION PARAMETER's literal extent is not trusted (shape
-            // monomorphization copies one argument's extent onto another, the
-            // co-iteration guards' rule; wave-end review of G249)
-            // (an operand EXPRESSION keeps its provenance: any parameter it
-            // reads -- `A(0)` over a parameter A -- distrusts its literal)
-            let paramIds = (functionParamIdsCell ()).Value
-            let rec isParam (e: IRExpr) =
-                match e with
-                | IRVar (id, _) -> Set.contains id paramIds
-                | _ -> childrenOf e |> List.exists isParam
-            let bounds = List.map2 (fun e s -> let (l, b) = boundOf e s in ((if isParam e then None else l), b)) args strs
-            let (lit0, b0) = List.head bounds
-            if b0 = "" then "" else
-            bounds |> List.tail |> List.choose (fun (lit, b) ->
-                if b = "" || b = b0 || (lit.IsSome && lit = lit0) then None
-                else Some $"if ((int64_t)({b}) != (int64_t)({b0})) blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});")
-            |> String.concat " "
-        let rendered =
-            // Fused product-sum sum_t prod_L args[L][t]: one loop, one accumulator,
-            // rendered as an IIFE so it composes in any expression position --
-            // most importantly inside method_for kernels, where the moment
-            // formers' fiber kernels land. Bound comes from the first operand
-            // (TypeCheck rejects provably mismatched static extents), through the
-            // shared literal-or-runtime rule so a monomorphized `Idx<n>` fiber
-            // gives GCC its trip count instead of an opaque pointer load.
-            let argStrs = opStrs
-            let headTy = inferExprType (List.head args)
-            let elemStr =
-                match headTy with
-                | ArrayElem at -> elemTypeToCpp at.ElemType
-                | t -> elemTypeToCpp t
-            let product = argStrs |> List.map (fun a -> $"{a}[__pt]") |> String.concat " * "
-            // A peeled ragged/grouped ROW param is a RaggedRow<T>, which carries
-            // its length inline as `.len` and has no `.extents` at all -- the same
-            // rule mask / reduce / extents already apply. Reached by the grouped
-            // co-iteration `method_for(zip(ga, gb)) <@> lambda(ra, rb) ->
-            // prodsum(ra, rb)`, where every operand is such a row.
-            let prodSumBound (ty: IRType) (nameStr: string) =
-                match ty with
-                | ArrayElem a when isRaggedRowType a -> $"{nameStr}.len"
-                | _ -> literalOrRuntimeExtent ty nameStr 0
-            let serialBound = prodSumBound headTy (List.head argStrs)
-            let serialForm =
-                $"[&]() {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < {serialBound}; __pt++) {{ __ps += {product}; }} return __ps; }}()"
-            if not (fpReassocEnabled ()) then
-                recordFoldForm "" "serial (repro)" "prodsum"
-                serialForm
-            else
-                // The default build (BLADE_FP_REPRO unset): the same summation,
-                // reassociated. `prodsum`'s summation IS a builtin `+`, so the
-                // licence class is the one `foldKernelBuiltinOp` grants outright --
-                // an intrinsic has no where-clause to carry one, and needs none.
-                //
-                // NO WORKSHARING OpenMP either way: this IIFE routinely sits inside
-                // an already-parallel nest (the comm-triangular covariance loop),
-                // where a `parallel for` would nest teams. `omp simd` is a SIMD
-                // construct, creates no team, and is legal exactly there.
-                //
-                // Operands are re-spelled ~3K times by the lane form. A plain
-                // identifier (the peeled row / array name that reaches here in
-                // practice) is repeated verbatim, which keeps any BLADE_RESTRICT
-                // qualification on the pointer it names; anything else is bound
-                // once to an `auto&&` alias so a compound operand expression is
-                // evaluated exactly once, as it is today.
-                let isPlainName (s: string) =
-                    s.Length > 0
-                    && (System.Char.IsLetter s.[0] || s.[0] = '_')
-                    && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
-                let needAlias = argStrs |> List.exists (isPlainName >> not)
-                let opNames =
-                    if needAlias then argStrs |> List.mapi (fun i _ -> $"__pa{i}")
-                    else argStrs
-                let aliasDecls =
-                    if not needAlias then []
-                    else List.map2 (fun n s -> $"auto&& {n} = {s};") opNames argStrs
-                let prodAt (i: string) =
-                    opNames |> List.map (fun a -> $"{a}[{i}]") |> String.concat " * "
-                let boundOn = prodSumBound headTy (List.head opNames)
-                // WHICH FORM. `omp simd reduction(+:__ps)` where the element type
-                // admits it (`simdReducibleElem`), the K-lane chains otherwise.
-                //
-                // MEASURED over every shape that reaches this site (ST,
-                // OMP_NUM_THREADS=1, medians over 3 processes x 5 reps, round-robin;
-                // `bench\blade` and `bench\sym` full config, this machine):
-                //
-                //   gemv row fiber, 3001 x 2999, 2 streams
-                //       serial 7.16 ms   8 lanes 7.44 ms (0.96x)   simd 2.76 ms (2.60x)
-                //   comoment2, 201 x 10007, 2 streams
-                //       serial  163 ms   8 lanes 43.6 ms (3.74x)   simd 53.2 ms (3.07x)
-                //   comoment3, 61 x 2003, 3 streams
-                //       serial 59.3 ms   5 lanes 32.9 ms (1.80x)   simd 17.6 ms (3.36x)
-                //
-                // simd is the site's form because it wins the site, not because it
-                // wins everywhere: comoment2 genuinely prefers the lanes by 1.22x,
-                // and that is given up on purpose. What buys it back is that the
-                // lanes are worth NOTHING at the gemv fiber (0.96x -- the SLP
-                // permute storm documented in `genReduceComputeBinding`) and only
-                // half as much at three streams, so across the site simd is 2.99x
-                // geometric mean against the lanes' 1.86x, and it never regresses.
-                //
-                // NOTE the two 2-stream shapes DISAGREE (gemv wants simd, comoment2
-                // wants lanes), which is what rules out splitting this site by
-                // operand count: the stream count does not predict the winner, so a
-                // per-arity rule here would be a fit to two points, not a principle.
-                // `laneCountForStreams` still governs the fallback arm below (and
-                // Path B's chunked fold), which is why the arity-aware count
-                // survives the change.
-                // THE EXPLICIT K-LANE VECTOR FORM (review item M9, gap register
-                // G26). The simd form below hands GCC ONE accumulator, which it
-                // vectorizes to one ymm and never interleaves, so the loop-carried
-                // add caps the fold at 1.33 lanes/cycle however many FMA units sit
-                // idle. blade_fold_lanes.hpp spells the fold with K independent
-                // vector accumulators in a FIXED, documented tree (the raw-bit
-                // test `blade test fold-lanes` pins it against a scalar model), one
-                // load per element for a self-dot (`prodsum(row, row)`: the two
-                // operand spellings are textually one array). Admitted: 1..3
-                // operands, each a plain rank-1 array (dense or a ragged row --
-                // both carry `.data`; compound / sparse keep their own reads) over
-                // double / float. BLADE_FOLD_LANES=0 keeps the simd form, for A/B.
-                let vecForm =
-                    if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr) then None
-                    else
-                        let plainRank1 (ty: IRType) =
-                            match ty with
-                            | ArrayElem at ->
-                                arrayRank at = 1 && not (isCompoundArrayType at) && not (isSparseArrayType at)
-                                && elemTypeToCpp at.ElemType = elemStr
-                            | _ -> false
-                        if not (args |> List.forall (inferExprType >> plainRank1)) then None
-                        else foldVecKind argStrs
-                match vecForm with
-                | Some (kind, ops) ->
-                    let k = foldVecLanes kind
-                    (foldLanesUsedCell ()).Value <- true
-                    recordFoldForm "" (foldVecLabel kind k) "prodsum"
-                    // A compound operand expression is bound once (evaluated exactly
-                    // once, as every arm here does); a plain name is used as is.
-                    let vecNames = if needAlias then ops |> List.mapi (fun i _ -> $"__pa{i}") else ops
-                    let vecAliases =
-                        if not needAlias then []
-                        else List.map2 (fun n s -> $"auto&& {n} = {s};") vecNames ops
-                    let call =
-                        foldVecCall elemStr k kind (vecNames |> List.map (fun o -> $"{o}.data"))
-                            (prodSumBound headTy (List.head vecNames))
-                    if needAlias then $$"""[&]() { {{(String.concat " " vecAliases)}} return {{call}}; }()"""
-                    else call
-                | None ->
-                if simdReducibleElem elemStr then
-                    recordFoldForm "" "simd-reduction" "prodsum"
-                    let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt
-                    let body =
-                        aliasDecls
-                        @ [ $"const size_t __pn = {boundOn};"
-                            $"{elemStr} __ps = 0;" ]
-                        @ simdStmts
-                        @ [ "return __ps;" ]
-                    $$"""[&]() { {{(String.concat " " body)}} }()"""
-                else
-                // ARITY-AWARE lane count. One lane iteration of an L-operand
-                // prodsum keeps L loaded values plus its accumulator live, so the
-                // register budget the 8 lanes were measured against is spent L
-                // times over: 8 lanes on the THREE-operand form (the comoment3
-                // fiber kernel) measured 2.2-2.7x SLOWER than the serial chain
-                // while the same 8 lanes helped the two-operand form. The budget
-                // rule in `laneCountForStreams` is what reconciles those two
-                // measurements; the operand count IS the stream count here.
-                let kLanes = laneCountForStreams (List.length argStrs)
-                recordFoldForm "" $"K-lanes({kLanes})" "prodsum"
-                let (laneStmts, resultLane) =
-                    fpReassocLaneStmts kLanes elemStr "__pl" "__pt" "0" "__pn" prodAt
-                        (fun acc rhs -> $"{acc} += {rhs};")
-                let shortFallback =
-                    // Below K elements there is nothing to interleave, so this is
-                    // the serial chain verbatim -- same seed (the additive
-                    // identity), same ascending order, hence the same double.
-                    $"""if (__pn < (size_t){kLanes}) {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < __pn; __pt++) {{ __ps += {(prodAt "__pt")}; }} return __ps; }}"""
-                let body =
-                    aliasDecls
-                    @ [ $"const size_t __pn = {boundOn};"; shortFallback ]
-                    @ laneStmts
-                    @ [ $"return {resultLane};" ]
-                $$"""[&]() { {{(String.concat " " body)}} }()"""
-        let bindDecls = operandBinds |> List.map (fun (n, s, _) -> $"auto&& {n} = {s};") |> String.concat " "
-        let gatherFrees =
-            operandBinds |> List.rev
-            |> List.choose (fun (n, _, r) -> r |> Option.map (fun r -> $"nested_array_utilities::{r}({n});"))
-            |> String.concat " "
-        if prodGuard = "" && bindDecls = "" then rendered
-        elif gatherFrees = "" then $"([&]() {{ {bindDecls} {prodGuard} return {rendered}; }}())"
-        else $"([&]() {{ {bindDecls} {prodGuard} auto __gres = {rendered}; {gatherFrees} return __gres; }}())"
+        renderProdSumExpr subst names args
     | IRDisplayEmit (head, quoted, dataExpr, metaTail, None) ->
         // One display-frame line on stdout (docs/display-frames.md), answering
         // bool. The head / quoting flag / meta tail are elaboration-time
@@ -822,46 +446,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // escape table with the quoted-payload path (Frame.jsonString).
         $"blade_display::jsonstr({(exprToCppCore subst names dataExpr)})"
     | IRContains (arrExpr, valueExpr) ->
-        // Membership test as an IIFE returning bool, under THE ONE
-        // target-evaluation contract of every lane (Optimize's
-        // membership-hoisting note; the interpreter's Loops.fs order): the
-        // set operand is evaluated first, ONCE (`__cs`), then the target
-        // exactly ONCE (`__cx`), before any cell is read -- an empty set
-        // still evaluates the target, and a failing target fails before the
-        // scan. (The target used to be interpolated INSIDE the scan: once per
-        // scanned cell, never for an empty set.)
-        let arrStr = exprToCppCore subst names arrExpr
-        let valStr = exprToCppCore subst names valueExpr
-        // A rank-1 compound operand (filtered set) scans its compact buffer:
-        // bound = cardinality, elements via .data[i]. Dense stays .extents/[].
-        let isR1Compound =
-            match inferExprType arrExpr with
-            | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
-            | _ -> false
-        // Dense scan bound goes through the shared literal-or-runtime rule (a
-        // compound's cardinality is genuinely dynamic and has no literal form).
-        let bound =
-            if isR1Compound then "__cs.idx->cardinality"
-            else literalOrRuntimeExtent (inferExprType arrExpr) "__cs" 0
-        let elemAt = if isR1Compound then "__cs.data[__ci]" else "__cs[__ci]"
-        let scan = $"for (size_t __ci = 0; __ci < {bound}; __ci++) {{ if ({elemAt} == __cx) return true; }} return false;"
-        // MEMBERSHIP HOISTING (Optimize.planMembershipHoist): while the
-        // plan's host binding or one of its probing kernels is the
-        // declaration being emitted, the probe reads the structure built
-        // right before the host -- when it is built (`kind` is
-        // BLADE_MEMBER_NONE outside the host's window, and then the
-        // as-written scan runs, so a call of the kernel from anywhere else
-        // can never read a stale or freed structure). Same booleans either way.
-        let hoisted =
-            match arrExpr with
-            | IRVar (setId, _) -> Blade.Optimize.MemberHoistTable.tryProbe (currentDeclIdCell ()).Value setId
-            | _ -> None
-        match hoisted with
-        | Some plan ->
-            let g = memberHoistGlobalName plan.HostId plan.SetId
-            $"[&]() {{ auto&& __cs = {arrStr}; const auto __cx = {valStr}; if ({g}.kind != BLADE_MEMBER_NONE) return blade_member_test_i64(&{g}, (int64_t)(__cx)) != 0; {scan} }}()"
-        | None ->
-            $"[&]() {{ auto&& __cs = {arrStr}; const auto __cx = {valStr}; {scan} }}()"
+        renderContainsExpr subst names arrExpr valueExpr
 
     | IRArity (Some n, _) -> string n
     | IRArity (None, paramName) -> 
@@ -929,39 +514,9 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRFallback _ ->
         exprError "<|:> (allocated-fallback) in expression position -- it combines whole arrays; bind it and materialize with |> compute"
     | IRGuard (cond, body) ->
-        // guard(p, c) -> p ? c : 0 (type-appropriate zero)
-        let condStr = exprToCppCore subst names cond
-        let bodyStr = exprToCppCore subst names body
-        let zeroStr =
-            match inferExprType body with
-            | IRTScalar ETBool -> "false"
-            | t when scalarElemOf t = Some ETInt32 -> "0"
-            | t when scalarElemOf t = Some ETInt64 -> "0LL"
-            // A Float32 zero is a float: `c ? x : 0.0` is a DOUBLE, and the
-            // arithmetic around it would run in double.
-            | t when scalarElemOf t = Some ETFloat32 -> "0.0f"
-            | _ -> "0.0"
-        $"({condStr} ? {bodyStr} : {zeroStr})"
+        renderGuardExpr subst names cond body
     | IRCompose (f, g) ->
-        // f >> g = [=](auto... args) mutable { return g(f(args...)); }
-        // A composition is a closure VALUE like any other (it may be
-        // returned), so it copies what its operands name -- unless one of
-        // them shares a REBOUND binding, which must stay one variable
-        // (closureValueCapture; the type checker keeps such a composition
-        // from escaping). The operands' own captures count: an operand
-        // closure rendered inside the body reads the names it forwards.
-        let fStr = exprToCppCore subst names f
-        let gStr = exprToCppCore subst names g
-        let named =
-            [f; g] |> List.collect (fun op ->
-                let caps = ResizeArray<IRId>()
-                iterIRExpr (fun e ->
-                    match resolveCallable e with
-                    | Some c -> c.Captures |> List.iter (fun cap -> caps.Add cap.Id)
-                    | None -> ()) op
-                (collectVarRefsIR op |> Set.toList) @ List.ofSeq caps)
-        let (clause, spec) = closureValueCaptureOf named
-        $$"""{{clause}}(auto... __args){{spec}} { return {{gStr}}({{fStr}}(__args...)); }"""
+        renderComposeExpr subst names f g
     | IRComposeObj (f, g) ->
         exprError "compose_obj in expression position"
     | IRComposeMeth (f, g) ->
@@ -983,51 +538,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // would bind it to no loop) -- statement position only, by refusal.
         exprError "break_if (a rec-array while guard) in expression position"
     | IRAssign (target, value) ->
-        // A compact-group target (SymIdx / AntisymIdx / HermitianIdx) folds to
-        // its canonical cell first -- the write twin of renderIndexExpr's lazy
-        // read. A raw `arr[i][j]` on packed storage lands in the wrong cell or
-        // past a shrunken row (the reverse sweep's `__g_a(t) += d` scatter
-        // corrupted the heap this way).
-        match (match target with
-               | LVIndex (arr, idxs) -> renderIndexStore subst names arr idxs (exprToCppCore subst names value)
-               | _ -> None) with
-        | Some store -> store
-        | None ->
-        let targetStr =
-            match target with
-            | LVVar id -> Map.tryFind id names |> Option.defaultValue ((localVarName id))
-            | LVIndex (arr, idxs) ->
-                let arrStr = exprToCppCore subst names arr
-                let idxStr = idxs |> List.map (fun i -> $"[{(exprToCppCore subst names i)}]") |> String.concat ""
-                $"{arrStr}{idxStr}"
-            | LVField (obj, f) -> $"{(exprToCppCore subst names obj)}.{f}"
-            | LVOther e -> exprError "invalid assignment target"
-        // Copy-in-place: a sole-owner mut keeps ONE pool for the whole program. The
-        // wrapper is NOT repointed at the RHS; the RHS's elements are copied
-        // into the pool the mut has always owned, which leaves the RHS temp
-        // iteration-owned (its own scope frees it). `pool_base` is rank-generic
-        // -- at rank 1 the leaf arm just returns `&data[0]`, i.e. `data` itself.
-        // G245 (a): an admitted kernel-block rebinding copies the literal's
-        // cells into the pool the block's let owns, then frees the literal
-        match target, value with
-        | LVVar tid, IRVar (rid, _) when (match Map.tryFind rid (kernelMoves ()) with Some (t, _) -> t = tid | None -> false)
-                                        && (kernelMoveFrees ()).ContainsKey rid ->
-            let (_, n) = (kernelMoves ()).[rid]
-            let rhsStr = Map.tryFind rid names |> Option.defaultValue ((localVarName rid))
-            let frees = (kernelMoveFrees ()).[rid] |> String.concat " "
-            $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data)); {frees.TrimEnd(';')}"
-        | _ ->
-        match copyInPlaceAssign target value with
-        | Some (_, rid, n) ->
-            let rhsStr = Map.tryFind rid names |> Option.defaultValue ((localVarName rid))
-            $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data))"
-        | None ->
-        // Owned move (gap G92): free T's previous pool, then take R's.
-        match ownedMoveAssign target value with
-        | Some (_, rid) ->
-            ownedMoveRenderer targetStr (Map.tryFind rid names |> Option.defaultValue ((localVarName rid))) (ownedMoveStaticShape target)
-        | None ->
-            $"{targetStr} = {(exprToCppCore subst names value)}"
+        renderAssignExpr subst names target value
     | IRForRange (vid, lo, hi, body) ->
         exprError "for-range loop in expression position"
     | IROpaqueExtent ->
@@ -1041,6 +552,542 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // A hole in the back end, not a refusal -- see `recordUnhandledIRNode`.
         recordUnhandledIRNode "expression position" (other.GetType().Name)
         exprError ($"unsupported IR node: {(other.GetType().Name)}")
+
+/// exprToCppCore's subscripted all-literal rank-1 table (the comment is at its arm).
+and private renderLiteralTableRead (subst: SubstMap) (names: Map<IRId, string>) (elems: IRExpr list) (at: IRArrayType) (p: IRExpr) : string =
+    let pStr = exprToCppCore subst names p
+    // An integer table is the per-type static `key_table` (one
+    // instantiation per distinct key list, program-wide); a float table
+    // reads a constant std::array, which g++ folds into read-only data.
+    // Neither spelling is call-shaped, so the frame-elision scan
+    // (CodeGen.scanBodyCalls) is unaffected.
+    if elems |> List.forall (function IRLit (IRLitInt _) -> true | _ -> false) then
+        let ks = elems |> List.map (function IRLit (IRLitInt k) -> $"{k}LL" | _ -> "0LL") |> String.concat ", "
+        $"blade_arith::key_table<{ks}>::tab[{pStr}]"
+    else
+        let elemStr = elemTypeToCpp at.ElemType
+        let cells = elems |> List.map (exprToCppCore subst names) |> String.concat ", "
+        $"std::array<{elemStr}, {elems.Length}>{{{{ {cells} }}}}[{pStr}]"
+
+/// exprToCppCore's variable reference.
+and private renderVarExpr (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) (id: IRId) : string =
+    // A reference to a lifted callable WITH captures cannot stand bare
+    // in value position: the lifted C++ function carries trailing
+    // capture params, so the bare name neither converts to a
+    // std::function of the surface arity nor direct-calls correctly.
+    // Close the captures with an inline forwarding closure -- the same
+    // [&]-by-name chain as genCallableWrapper/genVarAliasBinding, valid
+    // in any scope where the captured locals are visible (i.e. wherever
+    // the lambda literal / partial application appeared). Capture-free
+    // callables keep the bare name (a plain function converts fine).
+    // The closure is a VALUE that may outlive this frame (returned,
+    // stored in a tuple, passed on), so it copies its captures unless
+    // one is rebound (closureValueCapture).
+    // The `callable.Id = id` guard matters: resolveCallable also sees
+    // THROUGH let-aliases, but an alias var is already a std::function
+    // of the surface arity with captures closed (genVarAliasBinding) --
+    // render it by name; only the direct lifted-callable reference
+    // needs the closure.
+    match resolveCallable expr with
+    | Some callable when callable.Id = id && not (List.isEmpty callable.Captures) ->
+        let safeName = sanitizeCppName callable.Name
+        let paramSig =
+            callable.Params
+            |> List.map (fun p ->
+                match p.Type with
+                | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
+                | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
+            |> String.concat ", "
+        let allArgs =
+            (callable.Params |> List.map (_.Name))
+            @ (captureForwardArgs names callable.Captures)
+            |> String.concat ", "
+        let (clause, spec) = closureValueCapture callable.Captures
+        $$"""{{clause}}({{paramSig}}){{spec}} { return {{safeName}}({{allArgs}}); }"""
+    | _ ->
+        match Map.tryFind id names with
+        | Some name ->
+            // A `.stream` binding read as a VALUE outside a scope that
+            // materializes it: render the deferred refusal sentinel, not
+            // a name no C++ declaration carries (CodeGenState, "STREAMED
+            // VALUES NEVER REACH C++").
+            (match streamedValueSentinel id name with
+             | Some sentinel -> sentinel
+             | None -> name)
+        | None -> (localVarName id)
+
+/// exprToCppCore's binary operator.
+and private renderBinOpExpr (subst: SubstMap) (names: Map<IRId, string>) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLoc) : string =
+    let render (lStr: string) (rStr: string) =
+        match renderContractBinOp op l r lStr rStr inferExprType loc, op with
+        | Some s, _ -> s
+        | None, IRCaret -> $"pow({lStr}, {rStr})"
+        | None, IRMath2 name -> renderMath2 name lStr rStr
+        | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+    // BIND ONCE (bench/notes/microkernel-sketches-review.md (removed 2026-10-24; in git history at cf2028cc) M2): the SAME
+    // canonicalizing compact read on both sides (`t(i, j, k) * t(i, j, k)`)
+    // is evaluated once into a local and the operator applied to it --
+    // one fold and one fetch instead of two. Pure read, same cell, same
+    // operator on the same two values: no value or order changes.
+    if l = r && isBindOnceCompactRead inferExprType l then
+        let once = exprToCppCore subst names l
+        let applied = render "__bo" "__bo"
+        $"([&]() {{ const auto __bo = {once}; return {applied}; }}())"
+    else
+    // A bare integer literal beside an Int32 renders as an `int`
+    // (int32AdaptedLiterals: the 32-bit width on every data model).
+    let (la, ra) = int32AdaptedLiterals inferExprType l r
+    let lStr = match l with IRLit (IRLitInt n) when la -> int32LiteralToCpp n | _ -> exprToCppCore subst names l
+    let rStr = match r with IRLit (IRLitInt n) when ra -> int32LiteralToCpp n | _ -> exprToCppCore subst names r
+    render lStr rStr
+
+/// exprToCppCore's projection out of a binding held as a FLAT C++ tuple (gap G42).
+and private renderFlatTupleProj (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
+    // Gap G42: the chain is rooted at a binding held as a FLAT C++ tuple
+    // under a left-nested IR type. Render by flat leaf position.
+    let (root, offset, sub) = (flatTupleProjection expr).Value
+    let rootStr = exprToCppCore subst names root
+    let rec build (ty: IRType) (k: int) : string * int =
+        match IR.stripUnits ty with
+        | IRTTuple ts ->
+            let (parts, k') =
+                ts |> List.fold (fun (acc, k) t ->
+                    let (s, k') = build t k
+                    (acc @ [s], k')) ([], k)
+            ($"""std::make_tuple({(parts |> String.concat ", ")})""", k')
+        | _ -> ($"std::get<{k}>({rootStr})", k + 1)
+    fst (build sub offset)
+
+/// exprToCppCore's tuple projection.
+and private renderTupleProjExpr (subst: SubstMap) (names: Map<IRId, string>) (e: IRExpr) (i: int) (isFlat: bool) : string =
+    if not isFlat then
+        $"std::get<{i}>({(exprToCppCore subst names e)})"
+    else
+        // Flat projection into potentially nested tuple -- compute navigation path
+        let parentTy = inferExprType e
+        let rec findPath (ty: IRType) (targetFlat: int) : int list =
+            match ty with
+            | IRTTuple ts ->
+                let mutable offset = 0
+                let mutable found = None
+                for idx in 0 .. ts.Length - 1 do
+                    if found.IsNone then
+                        let count = IR.flattenTupleLeaves ts.[idx] |> List.length
+                        if targetFlat < offset + count then
+                            match ts.[idx] with
+                            | IRTTuple _ -> found <- Some (idx :: findPath ts.[idx] (targetFlat - offset))
+                            | _ -> found <- Some [idx]
+                        offset <- offset + count
+                found |> Option.defaultValue [i]
+            | _ -> [i]
+        let path = findPath parentTy i
+        path |> List.fold (fun acc idx -> $"std::get<{idx}>({acc})") (exprToCppCore subst names e)
+
+/// exprToCppCore's call.
+and private renderAppExpr (subst: SubstMap) (names: Map<IRId, string>) (func: IRExpr) (args: IRExpr list) : string =
+    // Function signatures take Array<T,N> / Ragged<T> wrappers
+    // natively, one argument per Blade param. Array args pass through
+    // as-is (the wrapper carries its own shape via .extents/.lens/
+    // .offsets); no companion-arg synthesis. Non-array args render
+    // through exprToCpp normally.
+    // A callee that IS a lifted callable with captures (direct
+    // reference, not a let-alias: resolveCallable sees through aliases,
+    // but an alias var is already a std::function with captures closed
+    // -- call that by name) is called directly with the capture args
+    // appended, since the lifted signature is regular params + capture
+    // params.
+    // A `group_by` RESULT as an argument to a callable is refused, not
+    // rendered. Its C++ value is a row-pointer table (`Array<T*, 1>`) whose
+    // row lengths live in the producing group_keys' side state
+    // (`gk__ngroups` / `gk__offsets`), and no function signature carries
+    // that state: the callee's parameter renders as a dense `Array<T, 2>`,
+    // so the call was a g++ type error (and the callee's peels could not
+    // resolve a row length anyway). Capturing the grouped array in a
+    // lambda IS supported (the capture forwards the sidecar); passing it
+    // as an argument is not. The interpreter declines the same shape
+    // (Interp/Core.fs evalApp), so neither lane gives it a meaning.
+    let groupedArg =
+        args |> List.exists (fun a ->
+            match inferExprType a with
+            | ArrayElem at -> Blade.TypeLower.isGroupedRaggedShape at.IndexTypes
+            | _ -> false)
+    if groupedArg && (resolveCallable func).IsSome then
+        exprError "a group_by result cannot be passed as a function argument (its row lengths live in the group_keys side state, which no function signature carries) -- group inside the function from the values and keys, or capture the grouped array in a lambda instead"
+    else
+    let funcStr, captureArgs =
+        match func, resolveCallable func with
+        | IRVar (fid, _), Some callable when callable.Id = fid && not (List.isEmpty callable.Captures) ->
+            (sanitizeCppName callable.Name,
+             captureForwardArgs names callable.Captures)
+        | _ -> (exprToCppCore subst names func, [])
+    let argStrs =
+        args |> List.collect (fun a ->
+            let argStr = exprToCppCore subst names a
+            match a, inferExprType a with
+            | (IRVar _ | IRParam _), ArrayElem _ -> [argStr]
+            | _ -> [argStr])
+    $"""{funcStr}({(argStrs @ captureArgs |> String.concat ", ")})"""
+
+/// exprToCppCore's prodsum: the operand binds, the BL8011 co-iteration guard and the fold form.
+and private renderProdSumExpr (subst: SubstMap) (names: Map<IRId, string>) (args: IRExpr list) : string =
+    // G249: THE CO-ITERATION EXTENT GUARD of prodsum (BL8011). The walk
+    // below is bounded by the FIRST operand; an operand whose extent is
+    // known only at run time (a row of a run-time-shaped array, a
+    // `|> compute` over `0..extents(c)`) used to be read past its end.
+    // Every later operand is compared with the first once, before the
+    // first product, unless both extents are the same literal.
+    // G265 (a): an operand EXPRESSION (a row view `A(0)`, a call) is bound
+    // ONCE PER OCCURRENCE, in operand order, to an `auto&&` alias before
+    // the guard (never shared by spelling: two equal texts may be two
+    // calls of a writing function -- Codex design review), so the guard
+    // and every fold form below read plain names.
+    let isPlainOperand (s: string) =
+        s.Length > 0
+        && (System.Char.IsLetter s.[0] || s.[0] = '_')
+        && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
+    let rawStrs = args |> List.map (exprToCppCore subst names)
+    // (a UNARY prodsum too: its serial form re-spells the operand per
+    // element; and a partial sparse read -- an inline GATHER -- is bound
+    // the same way, in its operand position, and freed after the fold:
+    // Codex diff review of G265)
+    let gatherOf (e: IRExpr) = match e with GatherTeardown r -> Some r | _ -> None
+    let operandBinds =
+        List.zip args rawStrs |> List.mapi (fun i (e, s) ->
+            if isPlainOperand s then None else Some ($"__pg{i}", s, gatherOf e)) |> List.choose id
+    let opStrs =
+        rawStrs |> List.mapi (fun i s -> if isPlainOperand s then s else $"__pg{i}")
+    let prodGuard =
+        let strs = opStrs
+        if args.Length < 2 || not (strs |> List.forall isPlainOperand) then ""
+        else
+        let boundOf (e: IRExpr) (s: string) =
+            match inferExprType e with
+            | ArrayElem a when isRaggedRowType a -> (None, $"{s}.len")
+            | ArrayElem a when arrayRank a >= 1 && not (isCompoundArrayType a) && not (isSparseArrayType a) ->
+                (literalExtentOfArray a 0, $"{s}.extents[0]")
+            | _ -> (None, "")
+        // a FUNCTION PARAMETER's literal extent is not trusted (shape
+        // monomorphization copies one argument's extent onto another, the
+        // co-iteration guards' rule; wave-end review of G249)
+        // (an operand EXPRESSION keeps its provenance: any parameter it
+        // reads -- `A(0)` over a parameter A -- distrusts its literal)
+        let paramIds = (functionParamIdsCell ()).Value
+        let rec isParam (e: IRExpr) =
+            match e with
+            | IRVar (id, _) -> Set.contains id paramIds
+            | _ -> childrenOf e |> List.exists isParam
+        let bounds = List.map2 (fun e s -> let (l, b) = boundOf e s in ((if isParam e then None else l), b)) args strs
+        let (lit0, b0) = List.head bounds
+        if b0 = "" then "" else
+        bounds |> List.tail |> List.choose (fun (lit, b) ->
+            if b = "" || b = b0 || (lit.IsSome && lit = lit0) then None
+            else Some $"if ((int64_t)({b}) != (int64_t)({b0})) blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});")
+        |> String.concat " "
+    let rendered = renderProdSumFold args opStrs
+    let bindDecls = operandBinds |> List.map (fun (n, s, _) -> $"auto&& {n} = {s};") |> String.concat " "
+    let gatherFrees =
+        operandBinds |> List.rev
+        |> List.choose (fun (n, _, r) -> r |> Option.map (fun r -> $"nested_array_utilities::{r}({n});"))
+        |> String.concat " "
+    if prodGuard = "" && bindDecls = "" then rendered
+    elif gatherFrees = "" then $"([&]() {{ {bindDecls} {prodGuard} return {rendered}; }}())"
+    else $"([&]() {{ {bindDecls} {prodGuard} auto __gres = {rendered}; {gatherFrees} return __gres; }}())"
+
+/// The fold form of renderProdSumExpr over its operands' (bound) spellings.
+and private renderProdSumFold (args: IRExpr list) (opStrs: string list) : string =
+    // Fused product-sum sum_t prod_L args[L][t]: one loop, one accumulator,
+    // rendered as an IIFE so it composes in any expression position --
+    // most importantly inside method_for kernels, where the moment
+    // formers' fiber kernels land. Bound comes from the first operand
+    // (TypeCheck rejects provably mismatched static extents), through the
+    // shared literal-or-runtime rule so a monomorphized `Idx<n>` fiber
+    // gives GCC its trip count instead of an opaque pointer load.
+    let argStrs = opStrs
+    let headTy = inferExprType (List.head args)
+    let elemStr =
+        match headTy with
+        | ArrayElem at -> elemTypeToCpp at.ElemType
+        | t -> elemTypeToCpp t
+    let product = argStrs |> List.map (fun a -> $"{a}[__pt]") |> String.concat " * "
+    // A peeled ragged/grouped ROW param is a RaggedRow<T>, which carries
+    // its length inline as `.len` and has no `.extents` at all -- the same
+    // rule mask / reduce / extents already apply. Reached by the grouped
+    // co-iteration `method_for(zip(ga, gb)) <@> lambda(ra, rb) ->
+    // prodsum(ra, rb)`, where every operand is such a row.
+    let prodSumBound (ty: IRType) (nameStr: string) =
+        match ty with
+        | ArrayElem a when isRaggedRowType a -> $"{nameStr}.len"
+        | _ -> literalOrRuntimeExtent ty nameStr 0
+    let serialBound = prodSumBound headTy (List.head argStrs)
+    let serialForm =
+        $"[&]() {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < {serialBound}; __pt++) {{ __ps += {product}; }} return __ps; }}()"
+    if not (fpReassocEnabled ()) then
+        recordFoldForm "" "serial (repro)" "prodsum"
+        serialForm
+    else
+        // The default build (BLADE_FP_REPRO unset): the same summation,
+        // reassociated. `prodsum`'s summation IS a builtin `+`, so the
+        // licence class is the one `foldKernelBuiltinOp` grants outright --
+        // an intrinsic has no where-clause to carry one, and needs none.
+        //
+        // NO WORKSHARING OpenMP either way: this IIFE routinely sits inside
+        // an already-parallel nest (the comm-triangular covariance loop),
+        // where a `parallel for` would nest teams. `omp simd` is a SIMD
+        // construct, creates no team, and is legal exactly there.
+        //
+        // Operands are re-spelled ~3K times by the lane form. A plain
+        // identifier (the peeled row / array name that reaches here in
+        // practice) is repeated verbatim, which keeps any BLADE_RESTRICT
+        // qualification on the pointer it names; anything else is bound
+        // once to an `auto&&` alias so a compound operand expression is
+        // evaluated exactly once, as it is today.
+        let isPlainName (s: string) =
+            s.Length > 0
+            && (System.Char.IsLetter s.[0] || s.[0] = '_')
+            && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
+        let needAlias = argStrs |> List.exists (isPlainName >> not)
+        let opNames =
+            if needAlias then argStrs |> List.mapi (fun i _ -> $"__pa{i}")
+            else argStrs
+        let aliasDecls =
+            if not needAlias then []
+            else List.map2 (fun n s -> $"auto&& {n} = {s};") opNames argStrs
+        let prodAt (i: string) =
+            opNames |> List.map (fun a -> $"{a}[{i}]") |> String.concat " * "
+        let boundOn = prodSumBound headTy (List.head opNames)
+        // WHICH FORM. `omp simd reduction(+:__ps)` where the element type
+        // admits it (`simdReducibleElem`), the K-lane chains otherwise.
+        //
+        // MEASURED over every shape that reaches this site (ST,
+        // OMP_NUM_THREADS=1, medians over 3 processes x 5 reps, round-robin;
+        // `bench\blade` and `bench\sym` full config, this machine):
+        //
+        //   gemv row fiber, 3001 x 2999, 2 streams
+        //       serial 7.16 ms   8 lanes 7.44 ms (0.96x)   simd 2.76 ms (2.60x)
+        //   comoment2, 201 x 10007, 2 streams
+        //       serial  163 ms   8 lanes 43.6 ms (3.74x)   simd 53.2 ms (3.07x)
+        //   comoment3, 61 x 2003, 3 streams
+        //       serial 59.3 ms   5 lanes 32.9 ms (1.80x)   simd 17.6 ms (3.36x)
+        //
+        // simd is the site's form because it wins the site, not because it
+        // wins everywhere: comoment2 genuinely prefers the lanes by 1.22x,
+        // and that is given up on purpose. What buys it back is that the
+        // lanes are worth NOTHING at the gemv fiber (0.96x -- the SLP
+        // permute storm documented in `genReduceComputeBinding`) and only
+        // half as much at three streams, so across the site simd is 2.99x
+        // geometric mean against the lanes' 1.86x, and it never regresses.
+        //
+        // NOTE the two 2-stream shapes DISAGREE (gemv wants simd, comoment2
+        // wants lanes), which is what rules out splitting this site by
+        // operand count: the stream count does not predict the winner, so a
+        // per-arity rule here would be a fit to two points, not a principle.
+        // `laneCountForStreams` still governs the fallback arm below (and
+        // Path B's chunked fold), which is why the arity-aware count
+        // survives the change.
+        // THE EXPLICIT K-LANE VECTOR FORM (review item M9, gap register
+        // G26). The simd form below hands GCC ONE accumulator, which it
+        // vectorizes to one ymm and never interleaves, so the loop-carried
+        // add caps the fold at 1.33 lanes/cycle however many FMA units sit
+        // idle. blade_fold_lanes.hpp spells the fold with K independent
+        // vector accumulators in a FIXED, documented tree (the raw-bit
+        // test `blade test fold-lanes` pins it against a scalar model), one
+        // load per element for a self-dot (`prodsum(row, row)`: the two
+        // operand spellings are textually one array). Admitted: 1..3
+        // operands, each a plain rank-1 array (dense or a ragged row --
+        // both carry `.data`; compound / sparse keep their own reads) over
+        // double / float. BLADE_FOLD_LANES=0 keeps the simd form, for A/B.
+        let vecForm =
+            if foldLanesMode () = FoldLanesOff || not (foldVecElem elemStr) then None
+            else
+                let plainRank1 (ty: IRType) =
+                    match ty with
+                    | ArrayElem at ->
+                        arrayRank at = 1 && not (isCompoundArrayType at) && not (isSparseArrayType at)
+                        && elemTypeToCpp at.ElemType = elemStr
+                    | _ -> false
+                if not (args |> List.forall (inferExprType >> plainRank1)) then None
+                else foldVecKind argStrs
+        match vecForm with
+        | Some (kind, ops) ->
+            let k = foldVecLanes kind
+            (foldLanesUsedCell ()).Value <- true
+            recordFoldForm "" (foldVecLabel kind k) "prodsum"
+            // A compound operand expression is bound once (evaluated exactly
+            // once, as every arm here does); a plain name is used as is.
+            let vecNames = if needAlias then ops |> List.mapi (fun i _ -> $"__pa{i}") else ops
+            let vecAliases =
+                if not needAlias then []
+                else List.map2 (fun n s -> $"auto&& {n} = {s};") vecNames ops
+            let call =
+                foldVecCall elemStr k kind (vecNames |> List.map (fun o -> $"{o}.data"))
+                    (prodSumBound headTy (List.head vecNames))
+            if needAlias then $$"""[&]() { {{(String.concat " " vecAliases)}} return {{call}}; }()"""
+            else call
+        | None ->
+        if simdReducibleElem elemStr then
+            recordFoldForm "" "simd-reduction" "prodsum"
+            let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt
+            let body =
+                aliasDecls
+                @ [ $"const size_t __pn = {boundOn};"
+                    $"{elemStr} __ps = 0;" ]
+                @ simdStmts
+                @ [ "return __ps;" ]
+            $$"""[&]() { {{(String.concat " " body)}} }()"""
+        else
+        // ARITY-AWARE lane count. One lane iteration of an L-operand
+        // prodsum keeps L loaded values plus its accumulator live, so the
+        // register budget the 8 lanes were measured against is spent L
+        // times over: 8 lanes on the THREE-operand form (the comoment3
+        // fiber kernel) measured 2.2-2.7x SLOWER than the serial chain
+        // while the same 8 lanes helped the two-operand form. The budget
+        // rule in `laneCountForStreams` is what reconciles those two
+        // measurements; the operand count IS the stream count here.
+        let kLanes = laneCountForStreams (List.length argStrs)
+        recordFoldForm "" $"K-lanes({kLanes})" "prodsum"
+        let (laneStmts, resultLane) =
+            fpReassocLaneStmts kLanes elemStr "__pl" "__pt" "0" "__pn" prodAt
+                (fun acc rhs -> $"{acc} += {rhs};")
+        let shortFallback =
+            // Below K elements there is nothing to interleave, so this is
+            // the serial chain verbatim -- same seed (the additive
+            // identity), same ascending order, hence the same double.
+            $"""if (__pn < (size_t){kLanes}) {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < __pn; __pt++) {{ __ps += {(prodAt "__pt")}; }} return __ps; }}"""
+        let body =
+            aliasDecls
+            @ [ $"const size_t __pn = {boundOn};"; shortFallback ]
+            @ laneStmts
+            @ [ $"return {resultLane};" ]
+        $$"""[&]() { {{(String.concat " " body)}} }()"""
+
+/// exprToCppCore's membership test.
+and private renderContainsExpr (subst: SubstMap) (names: Map<IRId, string>) (arrExpr: IRExpr) (valueExpr: IRExpr) : string =
+    // Membership test as an IIFE returning bool, under THE ONE
+    // target-evaluation contract of every lane (Optimize's
+    // membership-hoisting note; the interpreter's Loops.fs order): the
+    // set operand is evaluated first, ONCE (`__cs`), then the target
+    // exactly ONCE (`__cx`), before any cell is read -- an empty set
+    // still evaluates the target, and a failing target fails before the
+    // scan. (The target used to be interpolated INSIDE the scan: once per
+    // scanned cell, never for an empty set.)
+    let arrStr = exprToCppCore subst names arrExpr
+    let valStr = exprToCppCore subst names valueExpr
+    // A rank-1 compound operand (filtered set) scans its compact buffer:
+    // bound = cardinality, elements via .data[i]. Dense stays .extents/[].
+    let isR1Compound =
+        match inferExprType arrExpr with
+        | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
+        | _ -> false
+    // Dense scan bound goes through the shared literal-or-runtime rule (a
+    // compound's cardinality is genuinely dynamic and has no literal form).
+    let bound =
+        if isR1Compound then "__cs.idx->cardinality"
+        else literalOrRuntimeExtent (inferExprType arrExpr) "__cs" 0
+    let elemAt = if isR1Compound then "__cs.data[__ci]" else "__cs[__ci]"
+    let scan = $"for (size_t __ci = 0; __ci < {bound}; __ci++) {{ if ({elemAt} == __cx) return true; }} return false;"
+    // MEMBERSHIP HOISTING (Optimize.planMembershipHoist): while the
+    // plan's host binding or one of its probing kernels is the
+    // declaration being emitted, the probe reads the structure built
+    // right before the host -- when it is built (`kind` is
+    // BLADE_MEMBER_NONE outside the host's window, and then the
+    // as-written scan runs, so a call of the kernel from anywhere else
+    // can never read a stale or freed structure). Same booleans either way.
+    let hoisted =
+        match arrExpr with
+        | IRVar (setId, _) -> Blade.Optimize.MemberHoistTable.tryProbe (currentDeclIdCell ()).Value setId
+        | _ -> None
+    match hoisted with
+    | Some plan ->
+        let g = memberHoistGlobalName plan.HostId plan.SetId
+        $"[&]() {{ auto&& __cs = {arrStr}; const auto __cx = {valStr}; if ({g}.kind != BLADE_MEMBER_NONE) return blade_member_test_i64(&{g}, (int64_t)(__cx)) != 0; {scan} }}()"
+    | None ->
+        $"[&]() {{ auto&& __cs = {arrStr}; const auto __cx = {valStr}; {scan} }}()"
+
+/// exprToCppCore's guard.
+and private renderGuardExpr (subst: SubstMap) (names: Map<IRId, string>) (cond: IRExpr) (body: IRExpr) : string =
+    // guard(p, c) -> p ? c : 0 (type-appropriate zero)
+    let condStr = exprToCppCore subst names cond
+    let bodyStr = exprToCppCore subst names body
+    let zeroStr =
+        match inferExprType body with
+        | IRTScalar ETBool -> "false"
+        | t when scalarElemOf t = Some ETInt32 -> "0"
+        | t when scalarElemOf t = Some ETInt64 -> "0LL"
+        // A Float32 zero is a float: `c ? x : 0.0` is a DOUBLE, and the
+        // arithmetic around it would run in double.
+        | t when scalarElemOf t = Some ETFloat32 -> "0.0f"
+        | _ -> "0.0"
+    $"({condStr} ? {bodyStr} : {zeroStr})"
+
+/// exprToCppCore's composition.
+and private renderComposeExpr (subst: SubstMap) (names: Map<IRId, string>) (f: IRExpr) (g: IRExpr) : string =
+    // f >> g = [=](auto... args) mutable { return g(f(args...)); }
+    // A composition is a closure VALUE like any other (it may be
+    // returned), so it copies what its operands name -- unless one of
+    // them shares a REBOUND binding, which must stay one variable
+    // (closureValueCapture; the type checker keeps such a composition
+    // from escaping). The operands' own captures count: an operand
+    // closure rendered inside the body reads the names it forwards.
+    let fStr = exprToCppCore subst names f
+    let gStr = exprToCppCore subst names g
+    let named =
+        [f; g] |> List.collect (fun op ->
+            let caps = ResizeArray<IRId>()
+            iterIRExpr (fun e ->
+                match resolveCallable e with
+                | Some c -> c.Captures |> List.iter (fun cap -> caps.Add cap.Id)
+                | None -> ()) op
+            (collectVarRefsIR op |> Set.toList) @ List.ofSeq caps)
+    let (clause, spec) = closureValueCaptureOf named
+    $$"""{{clause}}(auto... __args){{spec}} { return {{gStr}}({{fStr}}(__args...)); }"""
+
+/// exprToCppCore's assignment.
+and private renderAssignExpr (subst: SubstMap) (names: Map<IRId, string>) (target: IRExpr) (value: IRExpr) : string =
+    // A compact-group target (SymIdx / AntisymIdx / HermitianIdx) folds to
+    // its canonical cell first -- the write twin of renderIndexExpr's lazy
+    // read. A raw `arr[i][j]` on packed storage lands in the wrong cell or
+    // past a shrunken row (the reverse sweep's `__g_a(t) += d` scatter
+    // corrupted the heap this way).
+    match (match target with
+           | LVIndex (arr, idxs) -> renderIndexStore subst names arr idxs (exprToCppCore subst names value)
+           | _ -> None) with
+    | Some store -> store
+    | None ->
+    let targetStr =
+        match target with
+        | LVVar id -> Map.tryFind id names |> Option.defaultValue ((localVarName id))
+        | LVIndex (arr, idxs) ->
+            let arrStr = exprToCppCore subst names arr
+            let idxStr = idxs |> List.map (fun i -> $"[{(exprToCppCore subst names i)}]") |> String.concat ""
+            $"{arrStr}{idxStr}"
+        | LVField (obj, f) -> $"{(exprToCppCore subst names obj)}.{f}"
+        | LVOther e -> exprError "invalid assignment target"
+    // Copy-in-place: a sole-owner mut keeps ONE pool for the whole program. The
+    // wrapper is NOT repointed at the RHS; the RHS's elements are copied
+    // into the pool the mut has always owned, which leaves the RHS temp
+    // iteration-owned (its own scope frees it). `pool_base` is rank-generic
+    // -- at rank 1 the leaf arm just returns `&data[0]`, i.e. `data` itself.
+    // G245 (a): an admitted kernel-block rebinding copies the literal's
+    // cells into the pool the block's let owns, then frees the literal
+    match target, value with
+    | LVVar tid, IRVar (rid, _) when (match Map.tryFind rid (kernelMoves ()) with Some (t, _) -> t = tid | None -> false)
+                                    && (kernelMoveFrees ()).ContainsKey rid ->
+        let (_, n) = (kernelMoves ()).[rid]
+        let rhsStr = Map.tryFind rid names |> Option.defaultValue ((localVarName rid))
+        let frees = (kernelMoveFrees ()).[rid] |> String.concat " "
+        $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data)); {frees.TrimEnd(';')}"
+    | _ ->
+    match copyInPlaceAssign target value with
+    | Some (_, rid, n) ->
+        let rhsStr = Map.tryFind rid names |> Option.defaultValue ((localVarName rid))
+        $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data))"
+    | None ->
+    // Owned move (gap G92): free T's previous pool, then take R's.
+    match ownedMoveAssign target value with
+    | Some (_, rid) ->
+        ownedMoveRenderer targetStr (Map.tryFind rid names |> Option.defaultValue ((localVarName rid))) (ownedMoveStaticShape target)
+    | None ->
+        $"{targetStr} = {(exprToCppCore subst names value)}"
 
 /// Generate inline combinator application as an IIFE expression, for `L <@> f`
 /// in expression context (not a let RHS or function-body return -- those route

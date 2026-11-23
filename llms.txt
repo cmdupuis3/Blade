@@ -1,4 +1,4 @@
 # Project Overview
 This repository is for Blade, an array-oriented, functional language. Here, you will find the Blade compiler, Coq proofs, and general prose and user guides.
 
-Refer to AGENTS.md for a more complete overview.
+Refer to CLAUDE.md for a more complete overview.

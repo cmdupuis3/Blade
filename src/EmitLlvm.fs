@@ -5054,11 +5054,11 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
         match gkTy with
         | IRTGroupKeys (outer, _, ev) ->
             (match Blade.IRPrint.tryEvalIntIR outer.Extent, ev with
-             | Some n, None -> Some (Blade.Optimize.GaPositional n)
+             | Some n, None -> Some (Blade.Optimize.GroupAggRegime.GaPositional n)
              | Some _, Some vs when vs |> List.forall (function EVInt _ -> true | _ -> false) ->
-                 Some (Blade.Optimize.GaEnum (vs |> List.choose (function EVInt n -> Some n | _ -> None)))
+                 Some (Blade.Optimize.GroupAggRegime.GaEnum (vs |> List.choose (function EVInt n -> Some n | _ -> None)))
              | Some _, Some _ -> None
-             | None, _ -> Some Blade.Optimize.GaDynamic)
+             | None, _ -> Some Blade.Optimize.GroupAggRegime.GaDynamic)
         | _ -> None
     // the key column must be a stored pool: a producer read once per row here
     // would change the CSR's evaluation count (one read per pass, as written)
@@ -5069,14 +5069,14 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
     let kernels =
         plan.States |> List.map (fun st ->
             match st.Kind with
-            | Blade.Optimize.GaSeeded (fk, _) | Blade.Optimize.GaUnseeded fk ->
+            | Blade.Optimize.GroupAggKind.GaSeeded (fk, _) | Blade.Optimize.GroupAggKind.GaUnseeded fk ->
                 (match resolveCallable fk with Some cl when cl.Params.Length = 2 -> Some cl | _ -> None)
             | _ -> None)
     let placeable =
         srcArrs |> List.forall (List.forall dense)
         && List.forall2 (fun (st: Blade.Optimize.GroupAggState) (k: IRCallable option) ->
                 match st.Kind with
-                | Blade.Optimize.GaSeeded _ | Blade.Optimize.GaUnseeded _ -> k.IsSome
+                | Blade.Optimize.GroupAggKind.GaSeeded _ | Blade.Optimize.GroupAggKind.GaUnseeded _ -> k.IsSome
                 | _ -> true) plan.States kernels
     if not placeable then false else
     plan.EmittedLlvm.Value <- true
@@ -5109,20 +5109,20 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
         let readSrc (k: int) = coerce c ty (readCell c srcArrs.[j].[k] [ iv ki ])
         let firstRow () = isZero (loadCell c ScI64 cntPtr).Reg
         match st.Kind, kernels.[j] with
-        | Blade.Optimize.GaUnseeded _, Some cl ->
+        | Blade.Optimize.GroupAggKind.GaUnseeded _, Some cl ->
             let v = readSrc 0
             ifElse (firstRow ())
                 (fun () -> storeCell c ty accPtr v)
                 (fun () ->
                     let acc = loadCell c ty accPtr
                     storeCell c ty accPtr (coerce c ty (applyKernel c cl [ KScalar acc; KScalar v ])))
-        | Blade.Optimize.GaSeeded (_, seed), Some cl ->
+        | Blade.Optimize.GroupAggKind.GaSeeded (_, seed), Some cl ->
             if dynamic then
                 ifThen (firstRow ()) (fun () -> storeCell c ty accPtr (coerce c ty (emitExpr c seed)))
             let acc = loadCell c ty accPtr
             let v = readSrc 0
             storeCell c ty accPtr (coerce c ty (applyKernel c cl [ KScalar acc; KScalar v ]))
-        | Blade.Optimize.GaProdSum, _ ->
+        | Blade.Optimize.GroupAggKind.GaProdSum, _ ->
             if dynamic then ifThen (firstRow ()) (fun () -> storeCell c ty accPtr (zeroOf ty))
             let a = readSrc 0
             let b = readSrc 1
@@ -5136,7 +5136,7 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
             ln c (renderBin { Dest = s; Opcode = (if isFloatSc ty then "fadd" else "add"); Flags = accFlags; Ty = ty; Lhs = cur.Reg; Rhs = prod })
             storeCell c ty accPtr { Reg = s; Ty = ty }
         | _ -> ()
-    let isCount (st: Blade.Optimize.GroupAggState) = (match st.Kind with Blade.Optimize.GaCount -> true | _ -> false)
+    let isCount (st: Blade.Optimize.GroupAggState) = (match st.Kind with Blade.Optimize.GroupAggKind.GaCount -> true | _ -> false)
     let prefixOffsets (ngOp: string) (counts: string) =
         let ngPlus1 =
             match tryLitI64 ngOp with
@@ -5150,7 +5150,7 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
             storeCell c ScI64 (i64At offs (i64Bin c "add" gi "1")) { Reg = i64Bin c "add" o.Reg n.Reg; Ty = ScI64 })
         offs
     match plan.Regime with
-    | Blade.Optimize.GaDynamic ->
+    | Blade.Optimize.GroupAggRegime.GaDynamic ->
         let slot = allocaOf c "[128 x i8], align 8"
         needShim c "blade_gkmap_init_llvm"
         let okInit = freshReg c
@@ -5197,10 +5197,10 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
         let offs = prefixOffsets ng counts
         c.GroupKeys.[id] <- { NGroups = ng; Offsets = offs; Perm = "null"; NSrc = nsrc; Agg = Some (counts, pools) }
         true
-    | Blade.Optimize.GaPositional _ | Blade.Optimize.GaEnum _ ->
+    | Blade.Optimize.GroupAggRegime.GaPositional _ | Blade.Optimize.GroupAggRegime.GaEnum _ ->
         let (ngroups, bucket, dropNeg) : int64 * (string -> string) * bool =
             match plan.Regime with
-            | Blade.Optimize.GaEnum vals ->
+            | Blade.Optimize.GroupAggRegime.GaEnum vals ->
                 let bucket (kReg: string) =
                     let mutable acc = "0"
                     let mutable found = "false"
@@ -5216,14 +5216,14 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
                     panicCodeUnless "BL8006" found "index out of bounds: a group_keys key outside its EnumIdx"
                     acc
                 (int64 vals.Length, bucket, false)
-            | Blade.Optimize.GaPositional n ->
+            | Blade.Optimize.GroupAggRegime.GaPositional n ->
                 let bucket (kReg: string) =
                     let ok = freshReg c
                     ln c (renderCmp { Dest = ok; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = kReg; Rhs = string n })
                     panicCodeUnless "BL8006" ok ($"index out of bounds: a group_keys key outside 0 .. {n - 1L}")
                     kReg
                 (n, bucket, true)
-            | Blade.Optimize.GaDynamic -> (0L, (fun k -> k), true)
+            | Blade.Optimize.GroupAggRegime.GaDynamic -> (0L, (fun k -> k), true)
         let ngOp = string ngroups
         let counts = allocPool c ScI64 ngOp
         let pools =
@@ -5233,9 +5233,9 @@ and private emitGroupAggPass (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAggP
             plan.States |> List.iteri (fun j st ->
                 let ty = sc st.Elem
                 match st.Kind with
-                | Blade.Optimize.GaSeeded (_, seed) ->
+                | Blade.Optimize.GroupAggKind.GaSeeded (_, seed) ->
                     storeCell c ty (gepCell c ty pools.[j] g) (coerce c ty (emitExpr c seed))
-                | Blade.Optimize.GaProdSum ->
+                | Blade.Optimize.GroupAggKind.GaProdSum ->
                     storeCell c ty (gepCell c ty pools.[j] g) (zeroOf ty)
                 | _ -> ()))
         emitCountedLoop c nsrc (fun ki ->
@@ -5292,14 +5292,14 @@ and private bindGroupAggPeelIn (c: Ctx) (id: IRId) (plan: Blade.Optimize.GroupAg
              let ty = if st.Elem = ETInt64 then ScI64 else ScF64
              let pool =
                  match st.Kind with
-                 | Blade.Optimize.GaCount ->
+                 | Blade.Optimize.GroupAggKind.GaCount ->
                      let p = allocPool c ScI64 gk.NGroups
                      emitCountedLoopTo c gk.NGroups (fun g ->
                          let lo = loadCell c ScI64 (gepCell c ScI64 gk.Offsets g)
                          let hi = loadCell c ScI64 (gepCell c ScI64 gk.Offsets (i64Bin c "add" g "1"))
                          storeCell c ScI64 (gepCell c ScI64 p g) { Reg = i64Bin c "sub" hi.Reg lo.Reg; Ty = ScI64 })
                      p
-                 | Blade.Optimize.GaUnseeded _ ->
+                 | Blade.Optimize.GroupAggKind.GaUnseeded _ ->
                      // where the peel's own reduce raised it: the ordinary
                      // peel runs the kernel body inlined, frameless (gap G76:
                      // one frame list, the C++ lane's and the interpreter's),
@@ -5436,9 +5436,9 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
     | IRCompute _ when (match peelCompute value with
                         | IRApplyCombinator pinfo ->
                             (match Blade.Optimize.HotRowTable.tryProducer id with
-                             | Some plan when (match plan.Form with Blade.Optimize.RowFold -> true | _ -> false) ->
+                             | Some plan when (match plan.Form with Blade.Optimize.HotRowForm.RowFold -> true | _ -> false) ->
                                 tryBindHotRowProducer c id name plan pinfo
-                             | Some plan when (match plan.Form with Blade.Optimize.ChunkFold -> true | _ -> false) ->
+                             | Some plan when (match plan.Form with Blade.Optimize.HotRowForm.ChunkFold -> true | _ -> false) ->
                                 tryBindFlatEpilogueProducer c id name plan pinfo
                              | _ -> false)
                         | _ -> false) -> ()
@@ -5450,7 +5450,7 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
     // B1 (round-2 cell epilogues): the producer's fused loop already folded
     // this binding's cells into the published accumulator.
     | IRReduceCompute _ when (match Blade.Optimize.HotRowTable.tryConsumer id with
-                              | Some plan -> (match plan.Form with Blade.Optimize.ChunkFold -> true | _ -> false)
+                              | Some plan -> (match plan.Form with Blade.Optimize.HotRowForm.ChunkFold -> true | _ -> false)
                                              && c.Slots.ContainsKey plan.RowSumId
                               | None -> false) ->
         let plan = (Blade.Optimize.HotRowTable.tryConsumer id).Value
@@ -5608,7 +5608,7 @@ and private bindNamed (c: Ctx) (id: IRId) (name: string) (declTy: IRType) (value
 /// fills the stashed pools first, in member order, then takes its own path.
 and private siblingLlvmPreflight (g: Blade.Optimize.SiblingMapGroup) : Result<unit, string> =
     match g.Kind with
-    | Blade.Optimize.SibHaloStream _ ->
+    | Blade.Optimize.SiblingMapKind.SibHaloStream _ ->
         Error "the LLVM lane has no segments arm: a streamed halo program runs in the C++ lane, whose segment run loop realizes the group"
     | _ ->
     match g.Members |> List.tryFindIndex (fun m -> (Blade.Optimize.HotRowTable.tryProducer m).IsSome) with
@@ -5644,9 +5644,9 @@ and private tryBindSiblingMember (c: Ctx) (id: IRId) (name: string) (ainfo: Appl
             | AVirt _ | AVirtFlat _ ->
                 isDenseShape a.Groups
                 && (match g.Kind with
-                    | Blade.Optimize.SibFlat cells -> shapeCells a.Groups = cells
-                    | Blade.Optimize.SibHalo _ -> a.Extents = [ ext ]
-                    | Blade.Optimize.SibHaloStream _ -> false)
+                    | Blade.Optimize.SiblingMapKind.SibFlat cells -> shapeCells a.Groups = cells
+                    | Blade.Optimize.SiblingMapKind.SibHalo _ -> a.Extents = [ ext ]
+                    | Blade.Optimize.SiblingMapKind.SibHaloStream _ -> false)
             | APool _ -> false
         if not shapeOk then
             // fallback: the stashed pools are filled here, in member order
@@ -5663,14 +5663,14 @@ and private tryBindSiblingMember (c: Ctx) (id: IRId) (name: string) (ainfo: Appl
         else
             cell.[g.GroupId] <- (true, [], true)
             match g.Kind with
-            | Blade.Optimize.SibFlat _ ->
+            | Blade.Optimize.SiblingMapKind.SibFlat _ ->
                 let (_, a0, _) = List.head stash'
                 emitNest c a0.Extents (fun idxs ->
                     for (_, sa, sp) in stash' do
                         let v = coerce c sa.Elem (readCell c sa idxs)
                         storeCell c sa.Elem (gepCell c sa.Elem sp (storageOffset c sa.Groups idxs)) v)
                 record Blade.Effects.Applied [ $"llvm lane: one serial flat sweep writes {stash'.Length} outputs (this lane has no thread form)" ]
-            | Blade.Optimize.SibHalo _ ->
+            | Blade.Optimize.SiblingMapKind.SibHalo _ ->
                 let spans = stash' |> List.mapi (fun m (s, sa, sp) -> (s, s + List.item m g.Extents, sa, sp))
                 let points = spans |> List.collect (fun (s, z, _, _) -> [ s; z ]) |> List.distinct |> List.sort
                 for (lo, hi) in List.pairwise points do
@@ -5683,7 +5683,7 @@ and private tryBindSiblingMember (c: Ctx) (id: IRId) (name: string) (ainfo: Appl
                                     let v = coerce c sa.Elem (readCell c sa [ { Reg = idx; Ty = ScI64 } ])
                                     storeCell c sa.Elem (gepCell c sa.Elem sp idx) v)
                 record Blade.Effects.Applied [ $"llvm lane: one serial halo walk writes {stash'.Length} outputs, peeled by member domain (this lane has no thread form)" ]
-            | Blade.Optimize.SibHaloStream _ -> invalidOp "sibling-maps: a streamed halo group never commits in the LLVM lane (its preflight declines)"
+            | Blade.Optimize.SiblingMapKind.SibHaloStream _ -> invalidOp "sibling-maps: a streamed halo group never commits in the LLVM lane (its preflight declines)"
         true
     | _ -> false
 
@@ -6193,7 +6193,7 @@ and private tryBindHotRowProducer (c: Ctx) (id: IRId) (name: string) (plan: Blad
                       Subject = plan.ConsumerName; Outcome = outcome; Evidence = evidence }
         let cellChain =
             match plan.CellChain with
-            | Some Blade.Optimize.Square ->
+            | Some Blade.Optimize.CellTerm.Square ->
                 let why =
                     if Blade.CodeGenState.fpReassocEnabled () then
                         Some (Blade.Optimize.cellEpilogueLicensedRowDecline "the hot row")

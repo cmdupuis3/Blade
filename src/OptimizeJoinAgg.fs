@@ -110,7 +110,7 @@ let planJoinAggregate (programFuncs: IRCallable list) (foreignRefs: Set<IRId>) (
     let enabled = joinAggEnabled ()
     let selection = printSelectionNames ()
     let llvmNote = "llvm lane: the rank-2 compound is refused there (C++ fallback), as for the hash join"
-    for jp in Blade.Optimize.EquiJoinTable.all () do
+    for jp in Blade.OptimizeEquiJoin.EquiJoinTable.all () do
         let jid, jname = jp.CompoundId, jp.CompoundName
         if not (modul.Bindings |> List.exists (fun b -> b.Id = jid)) then () else
         let refsJ (e: IRExpr) = Set.contains jid (collectVarRefsIR e)
