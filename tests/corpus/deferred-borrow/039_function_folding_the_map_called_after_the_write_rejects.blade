@@ -1,0 +1,9 @@
+// TEST: borrow a function folding the map, called after the write (rejects)
+// The fold inside f is a use of g at every call: evaluated at its binding the fold is 12.0, at the call 20.0.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+function f() -> Float64 = reduce(g, (+))
+x(0) = 5.0
+let s = f()
+// ERROR: BL4005 @ 6:1

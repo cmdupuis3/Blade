@@ -1,0 +1,9 @@
+// TEST: borrow a map kernel that writes what a captured uncomputed map reads (rejects)
+// R4's single traversal: the kernel of the computed map writes x per cell and
+// reads g, an uncomputed map over x: the second cell's read of g follows the
+// first cell's write.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let ys: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
+let c = method_for(ys) <@> lambda(y) -> { x(0) = x(0) + 1.0; y + g(0) } |> compute
+// ERROR: BL4005 @ 7:1

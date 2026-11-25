@@ -1,4 +1,6 @@
-// TEST: Inlined Call Bare Deferred Alias Chain Side Effect Order
+// TEST: Inlined Call Bare Deferred Alias Chain Side Effect Order (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, the alias chain of length 2 through the capturing (inlined) call:
 // the class is forced after the bump and prints [11]; r = 1 + 11 + 2 + 1.
@@ -16,8 +18,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
 let seen3 = seen2
 let h = lambda(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> k + p(0) + q(0) + cnt(0)
 let r = h(bump(cnt), seen3, good |> compute)
-// EXPECT: r = 15
-// EXPECT: cnt = [1]
-// EXPECT: seen = [11]
-// EXPECT: seen2 = [11]
-// EXPECT: seen3 = [11]
+// ERROR: BL4005 @ 19:11

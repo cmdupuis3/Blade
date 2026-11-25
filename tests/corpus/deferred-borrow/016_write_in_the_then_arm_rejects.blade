@@ -1,0 +1,9 @@
+// TEST: borrow a write in either arm of an if counts (rejects)
+// The write sits in the taken-or-not THEN arm of a top-level block; g is used
+// after the block, so the write may precede that use.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+let t = if a > 0.0 then { x(0) = 5.0; 1 } else 0
+let b = g(0)
+// ERROR: BL4005 @ 6:1

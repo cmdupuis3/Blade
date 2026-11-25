@@ -1,0 +1,15 @@
+// TEST: A Stage That Would Fail At The Zero Over A Guard Is Refused (rejects)
+// ERROR: BL4022 @ 14:9
+// ERROR-CONTAINS: cannot be evaluated at the zero at compile time
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// 10 / 0 panics (BL8013) on the computed guard and never runs on the uncomputed one: the two readings
+// differ in WHETHER the program fails. The evaluation at the zero cannot decide it, so it is refused.
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let ci: Array<Int64 like I> = [3, 0, -2]
+let inv = lambda(z: Int64) -> 10 / z
+let r = inv <$> guard(false, ci) |> compute

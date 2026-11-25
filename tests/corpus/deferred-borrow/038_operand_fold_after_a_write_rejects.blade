@@ -1,0 +1,12 @@
+// TEST: borrow a later operand folding the map after an earlier operand writes its input (rejects)
+// The left operand bump(cnt) writes cnt; the right operand folds seen, an uncomputed map over cnt.
+type I = Idx<1>
+let mut cnt: Array<Int64 like I> = [10]
+let mut other: Array<Int64 like I> = [5]
+function bump(c: mut Array<Int64 like I>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let seen = method_for(cnt) <@> lambda(v) -> v
+let r = bump(cnt) + reduce(seen, (+))
+// ERROR: BL4005 @ 10:9

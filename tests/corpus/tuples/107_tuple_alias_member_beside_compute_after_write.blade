@@ -1,4 +1,6 @@
-// TEST: Tuple Alias Member Beside Compute After Write
+// TEST: Tuple Alias Member Beside Compute After Write (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, a bare deferred alias member between a writing member and an
 // explicit compute: copied at its position, the class unprinted.
@@ -14,5 +16,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
     c(0)
 }
 let t = (bump(cnt), seen2, good |> compute)
-// EXPECT: t = (1, [11], [2])
-// EXPECT: cnt = [1]
+// ERROR: BL4005 @ 17:10

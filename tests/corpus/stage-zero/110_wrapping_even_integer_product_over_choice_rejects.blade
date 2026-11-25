@@ -1,0 +1,17 @@
+// TEST: An Integer Product By An Even Literal Over An Uncomputed Choice Is Refused (rejects)
+// ERROR: BL4022 @ 16:9
+// ERROR-CONTAINS: is not a stage that provably keeps zero cells zero and non-zero cells non-zero
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// The cell that breaks it: 4611686018427387904 * 4 = 2^64 wraps to 0, so the uncomputed choice takes the
+// right side (36) where the computed choice kept 2^62 and staged it to 0. An integer product keeps zero
+// cells only by an ODD literal (a bijection modulo 2^64).
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let big: Array<Int64 like I> = [4611686018427387904, 0, 1]
+let ci2: Array<Int64 like I> = [9, 4, 3]
+let quad = lambda(z: Int64) -> z * 4
+let r = quad <$> (big <|> ci2) |> compute

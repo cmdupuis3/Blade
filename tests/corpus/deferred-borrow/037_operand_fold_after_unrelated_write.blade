@@ -1,0 +1,14 @@
+// TEST: borrow a later operand folding the map after an unrelated write is accepted
+// The twin of 033 without an explicit compute below the statement's root: the right operand folds seen,
+// and the left operand writes storage seen does not read.
+type I = Idx<1>
+let mut cnt: Array<Int64 like I> = [10]
+let mut other: Array<Int64 like I> = [5]
+function bump(c: mut Array<Int64 like I>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let seen = method_for(cnt) <@> lambda(v) -> v
+let r = bump(other) + reduce(seen, (+))
+// EXPECT: r = 16
+// EXPECT: other = [6]

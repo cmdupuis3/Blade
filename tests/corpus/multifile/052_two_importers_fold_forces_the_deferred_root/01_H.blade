@@ -1,5 +1,7 @@
-// TEST: Two importers: a fold over a chain spanning three modules
+// TEST: Two importers: a fold over a chain spanning three modules (rejects)
 // MODULE: H
+// BORROW (2026-11-23): now refused at the write to H.x (BL4005, formalism 10.2, at lowering): an
+// uncomputed value over H.x is still used after it. The text below is the schedule it witnessed.
 // Gap G199: A maps H.d, Main maps A.pa and folds it: the fold evaluates
 // A.pa privately, which forces H.d under its own name. The later write to
 // H.x changes neither H.d nor A.pa.

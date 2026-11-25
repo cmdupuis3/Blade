@@ -146,6 +146,9 @@
          gather read it instead of scanning for the shape themselves. -->
     <Compile Include="src/IRAccess.fs" />
     <Compile Include="src/IRLift.fs" />
+    <!-- A projection of a named wholly-deferred tuple is its member (gap G326):
+         the IR normalization Lowering runs before its write judgments. -->
+    <Compile Include="src/IRDeferredTupleProj.fs" />
     <Compile Include="src/IRMono.fs" />
     <!-- The closed purity/totality whitelist (G35 row slots, G7 threaded
          joins), lane-neutral so the optimizer's sibling-fold pass and the C++
@@ -464,6 +467,12 @@
     <Compile Include="src/TypeCheckInferDecl.fs" />
     <Compile Include="src/TypeCheckValidate.fs" />
     <Compile Include="src/TypeCheck.fs" />
+    <!-- A stage over an uncomputed guard or choice (gap G335, formalism 10.4):
+         the refusal of a `<$>` stage whose law reading and computed reading
+         can differ, over the TYPED tree (the spans of the stage applications
+         live there). Needs TypeCheckSupport.typedExprChildren; called once at
+         the head of Lowering.lowerTypedProgram, before the lane split. -->
+    <Compile Include="src/StageZero.fs" />
     <!-- File-based module resolution: dotted import name -> .blade path, plus
          the transitive closure of an entry file's imports in dependency order.
          Needs Parser (import discovery) and ProviderRegistry/ProviderStatics
@@ -489,6 +498,7 @@
          core, the CUDA/MPI backends, and fusion-tree assembly. CodeGen.fs
          (function/module/program assembly + public entry points) keeps the
          module name and must stay last. -->
+    <Compile Include="src/CodeGenEmitterNames.fs" />
     <Compile Include="src/CodeGenState.fs" />
     <Compile Include="src/CodeGenExprSupport.fs" />
     <!-- The orbit-class fold's recogniser and plan (bench M4): shared by the
@@ -564,6 +574,8 @@
     <Compile Include="tests/Corpus.fs" />
     <Compile Include="tests/Runner.fs" />
     <Compile Include="tests/InterpDiff.fs" />
+    <Compile Include="tests/BorrowOracle.fs" />
+    <Compile Include="tests/BorrowGen.fs" />
     <Compile Include="tests/Test_Basic.fs" />
     <Compile Include="tests/Test_Loops.fs" />
     <Compile Include="tests/Test_Symmetry.fs" />
@@ -737,6 +749,7 @@
          (and run, when it pins values) through the corpus pipeline (Runner). -->
     <Compile Include="tests/DocTests.fs" />
     <Compile Include="tests/KnobsTests.fs" />
+    <Compile Include="tests/EmitterNameTests.fs" />
     <Compile Include="tests/RunAll.fs" />
     <!-- The CLI, three layers in dependency order: CliCommands.fs (compile/run/
          check/emit + the REPL loop), CliSelfTests.fs (the `blade test` blocks

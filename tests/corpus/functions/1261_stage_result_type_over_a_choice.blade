@@ -1,0 +1,40 @@
+// TEST: A Stage Over A Choice Of Stored Arrays Stores Its Own Result Type
+// Lane z (borrow round, 2026-11-24; gap G335, formalism 10.4): a `<$>` stage that moves a zero is refused
+// over an uncomputed choice (BL4022), so `positive`, `trunc`, `half` and `narrow` stage the COMPUTED
+// choice (same values: `cf <|> cf` is cf); the result-type subject over the uncomputed choice is kept by
+// `number` and two widening casts the rule accepts (`widen` Int64 -> Float64, `up` Float32 -> Float64).
+// ============================================================================
+// Borrow round, lane o: the stage result class (functions/1260) over a choice
+// `<|>` of stored arrays. The interpreter allocated the stage's output with the
+// INPUT's element type (Loops.applyWrappersToValue), so a Bool stage over two
+// Float64 arrays printed false for true and a Float64 stage over Bool arrays
+// printed nan. Pins from the C++ lane. Left out until the C++ lane compiles
+// them (BL9002 there, reported to the lead): a complex stage over a choice, and
+// any element-changing stage over a guard of a stored array.
+// ============================================================================
+let cf: Array<Float64 like Idx<2>> = [1.5, -2.0]
+let cb: Array<Bool like Idx<2>> = [true, false]
+let ci: Array<Int64 like Idx<2>> = [3, -4]
+let positive = lambda(z: Float64) -> z > 0.0
+let number = lambda(v: Bool) -> Float64(v)
+let trunc = lambda(z: Float64) -> Int64(floor(z))
+let half = lambda(k: Int64) -> Float64(k) * 0.5
+let narrow = lambda(z: Float64) -> Float32(z)
+let lift = lambda(z: Float64) -> complex(z, 1.0)
+let widen = lambda(k: Int64) -> Float64(k)
+let up = lambda(z: Float32) -> Float64(z)
+let cg: Array<Float32 like Idx<2>> = [1.5, -2.0]
+let r_bool = positive <$> (cf <|> cf |> compute) |> compute
+let r_num = number <$> (cb <|> cb) |> compute
+let r_int = trunc <$> (cf <|> cf |> compute) |> compute
+let r_flt = half <$> (ci <|> ci |> compute) |> compute
+let r_wid = widen <$> (ci <|> ci) |> compute
+let r_up = up <$> (cg <|> cg) |> compute
+let r_f32 = narrow <$> (cf <|> cf |> compute) |> compute
+// EXPECT: r_bool = [true, false]
+// EXPECT: r_num = [1.0, 0.0]
+// EXPECT: r_int = [1, -2]
+// EXPECT: r_flt = [1.5, -2.0]
+// EXPECT: r_f32 = [1.5, -2.0]
+// EXPECT: r_wid = [3.0, -4.0]
+// EXPECT: r_up = [1.5, -2.0]

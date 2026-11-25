@@ -1,4 +1,6 @@
-// TEST: a seed reading a kept leaf that a private operand's capture stores
+// TEST: a seed reading a kept leaf that a private operand's capture stores (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G233).
 // Gap G233, round 4 wave 10 (wave-end fable review, MINOR): the leaf p is kept
 // because the kernel of r -- the private operand of the leaf q -- captures it,
 // and the SEED reads p(0). The compiled lane took the seed-read route, found
@@ -13,7 +15,4 @@ let r = method_for(x) <@> lambda(v) -> v + p(1)
 let q = method_for(r) <@> lambda(v) -> v + 1.0
 let s = reduce(p <&!> q, (+), { let t = p(0); x(0) = 10.0; t })
 let w = p(0)
-// EXPECT: x = [10.0, 2.0]
-// EXPECT: p = [2.0, 4.0]
-// EXPECT: s = (8.0, 15.0)
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 15:1

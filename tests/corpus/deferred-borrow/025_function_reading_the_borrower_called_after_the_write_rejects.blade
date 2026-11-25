@@ -1,0 +1,10 @@
+// TEST: borrow a function that reads the borrower, called after the write (rejects)
+// A function reading g counts as a use of g at every call that may follow the
+// write.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+function first() -> Float64 = g(0)
+let a = first()
+x(0) = 5.0
+let b = first()
+// ERROR: BL4005 @ 7:1

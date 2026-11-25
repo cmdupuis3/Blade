@@ -1,0 +1,54 @@
+// TEST: A Guard Of A Stored Array In A Block, A Function Body And A Tuple
+// ============================================================================
+// Borrow round, lane x3 (item 2). In a block or a function body a let is
+// evaluated where it is bound: `guard(p, a)` over a stored array is `a`'s
+// cells where p holds, else zeros of a's shape (formalism 10.4). A tuple
+// evaluates its members at its construction (10.2), so a guard written as a
+// member is that array too. The interpreter gave a SCALAR 0.0 for the false
+// arm (then refused the fold, or the tuple's array member) and the C++ lane
+// emitted `(p ? a : 0.0)` (BL9002). Pins by hand.
+// ============================================================================
+let cf: Array<Float64 like Idx<3>> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like Idx<3>> = [9.0, 4.0, 3.0]
+let flag = cf(0) > 1.0
+let blk = {
+    let g = guard(flag, cf2)
+    let c = g |> compute
+    reduce(c, (+)) + reduce(g, (+)) + g(0)
+}
+let blk0 = {
+    let g = guard(!flag, cf2)
+    reduce(g, (+)) + g(0)
+}
+function f(a: Array<Float64 like Idx<3>>, p: Bool) -> Float64 = {
+    let g = guard(p, a)
+    let c = g |> compute
+    reduce(c, (+)) + reduce(g, (+)) + g(2)
+}
+let f1 = f(cf2, true)
+let f0 = f(cf2, false)
+function h(a: Array<Float64 like Idx<3>>, p: Bool) -> Array<Float64 like Idx<3>> = {
+    let g = guard(p, a)
+    method_for(g) <@> lambda(v) -> v + 1.0 |> compute
+}
+let h1 = h(cf, true)
+let h0 = h(cf, false)
+let t = (guard(false, cf), cf2)
+let t0 = t[0] |> compute
+let t1 = t[1](0)
+let u = (guard(flag, cf), 2.0)
+let u0 = u[0] |> compute
+let w = (guard(false, method_for(cf) <@> lambda(v) -> v * 2.0), guard(true, cf2) |> compute)
+let w0 = w[0] |> compute
+let w1 = reduce(w[1], (+))
+// EXPECT: blk = 41.0
+// EXPECT: blk0 = 0.0
+// EXPECT: f1 = 35.0
+// EXPECT: f0 = 0.0
+// EXPECT: h1 = [2.5, 1.0, -1.0]
+// EXPECT: h0 = [1.0, 1.0, 1.0]
+// EXPECT: t0 = [0.0, 0.0, 0.0]
+// EXPECT: t1 = 9.0
+// EXPECT: u0 = [1.5, 0.0, -2.0]
+// EXPECT: w0 = [0.0, 0.0, 0.0]
+// EXPECT: w1 = 16.0

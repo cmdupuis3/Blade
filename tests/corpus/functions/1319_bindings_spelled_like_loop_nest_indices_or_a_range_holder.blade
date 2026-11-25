@@ -1,0 +1,33 @@
+// TEST: Bindings, a capture and a parameter spelled like a loop nest's indices or a range holder
+// ============================================================================
+// Borrow round, lane x4 (gap G340). An outer product's nest declares `__i0` and
+// `__i1`; a module binding read in its kernel (m), the same binding captured by
+// a function whose body holds such a nest (p4), and a function parameter
+// spelled `__i1` read in its body's nest (p5) were shadowed by the indices. A
+// range-operand map `g` declares its bounds holder `__range0_g` beside the
+// user's binding of that spelling (BL9002 before). Each spelling now moves.
+// ============================================================================
+type I = Idx<3>
+type K = Idx<4>
+let __i0: Float64 = 3.0
+let __i1: Float64 = 5.0
+let __range0_g: Float64 = 7.0
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let b: Array<Float64 like K> = [1.0, 2.0, 3.0, 4.0]
+let m = method_for(a, b) <@> lambda(x, y) -> x * y + __i0 * __i1 |> compute
+let n: Int64 = 4
+let g = method_for(0..n) <@> lambda(i) -> Float64(i) + __range0_g |> compute
+function h(z: Float64) -> Float64 = {
+    let mm = method_for(a, b) <@> lambda(x, y) -> x * y + __i0 + z |> compute
+    reduce(reduce(mm, (+)), (+))
+}
+let p4 = h(1.0)
+function h2(__i1: Float64) -> Float64 = {
+    let mm = method_for(a, b) <@> lambda(x, y) -> x * y * __i1 |> compute
+    reduce(reduce(mm, (+)), (+))
+}
+let p5 = h2(2.0)
+// EXPECT: m = [[16.0, 17.0, 18.0, 19.0], [17.0, 19.0, 21.0, 23.0], [18.0, 21.0, 24.0, 27.0]]
+// EXPECT: g = [7.0, 8.0, 9.0, 10.0]
+// EXPECT: p4 = 108.0
+// EXPECT: p5 = 120.0

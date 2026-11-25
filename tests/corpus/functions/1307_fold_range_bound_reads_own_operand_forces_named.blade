@@ -1,0 +1,13 @@
+// TEST: A Fold Range Bound Reading A Cell Of The Fold's Own Deferred Operand Forces It Under Its Name
+// Gap G209 (borrow round, lane x): p is an operand of the fold, evaluated privately at its position, and
+// the range bound p(0) reads a cell of p, which forces p under its own name (a snapshot, formalism 10.2:
+// p prints). The C++ lane refused it (BL7004, functions/1061); it now restores p's record and forces it
+// there, as the interpreter does. No write follows while p is still used (the borrow rule).
+type I = Idx<2>
+let mut xs: Array<Int64 like I> = [2, 3]
+let p = method_for(xs) <@> lambda(x) -> x * 2
+let result = reduce(method_for(p, 0..p(0)) <@> lambda(x, k) -> x + k, (+), 0, axes = 2)
+let after = p(0)
+// EXPECT: result = 52
+// EXPECT: after = 4
+// EXPECT: p = [4, 6]

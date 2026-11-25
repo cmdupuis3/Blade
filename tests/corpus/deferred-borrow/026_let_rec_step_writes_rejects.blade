@@ -1,0 +1,17 @@
+// TEST: borrow a let rec step that writes the storage a borrower reads (rejects)
+// Each step of r calls bump, which writes x; g over x is used after r.
+type Step = Idx<3>
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+function bump() -> Float64 = {
+    x(0) = x(0) + 1.0
+    x(0)
+}
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+let rec r: Array<Float64 like Step> =
+    match r with
+    | zero -> zero
+    | zero :: s -> zero :: bump()
+    | prefix :: n -> prefix :: prefix(n - 1) + bump()
+let b = g(0)
+// ERROR: BL4005 @ 13:28

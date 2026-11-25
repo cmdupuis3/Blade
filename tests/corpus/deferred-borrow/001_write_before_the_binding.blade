@@ -1,0 +1,11 @@
+// TEST: borrow write before the binding is outside the borrow
+// The borrow (formalism 10.2): binding an uncomputed array value over storage
+// x makes x read-only until the value's last use. A write BEFORE the binding
+// is outside it: g reads the written cells under every reading.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+x(0) = 5.0
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(g, (+))
+let a = g(0)
+// EXPECT: s = 20.0
+// EXPECT: a = 10.0

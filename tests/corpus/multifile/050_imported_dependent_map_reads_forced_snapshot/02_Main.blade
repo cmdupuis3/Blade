@@ -1,4 +1,4 @@
-// TEST: An imported deferred map forced, written, then read through a dependent map
+// TEST: An imported deferred map forced, written, then read through a dependent map (rejects)
 // MODULE: Main
 module Main
 import H
@@ -6,5 +6,4 @@ let p = method_for(H.d) <@> lambda(v) -> v + 1.0
 let z = H.d(0)
 H.x(0) = 10.0
 let w = p(0)
-// EXPECT: z = 2.0
-// EXPECT: w = 3.0
+// ERROR-CONTAINS: an uncomputed value bound over it before the write

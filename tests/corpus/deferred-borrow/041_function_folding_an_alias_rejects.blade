@@ -1,0 +1,10 @@
+// TEST: borrow a function folding an alias of the map, called after the write (rejects)
+// g2 is g (one alias class): its fold is a use of g.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let g2 = g
+function f() -> Float64 = reduce(g2, (+))
+x(0) = 5.0
+let s = f()
+// ERROR: BL4005 @ 7:1

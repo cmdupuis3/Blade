@@ -1,0 +1,9 @@
+// TEST: borrow the write before the maps are bound is accepted
+type I = Idx<3>
+let mut y: Array<Float64 like I> = [2.0, 0.0, 1.0]
+y(2) = 9.0
+let g2 = method_for(y) <@> lambda(v) -> v + 1.0
+let g5 = method_for(g2) <@> lambda(a) -> a * 3.0
+let c6 = g5 |> compute
+// EXPECT: c6 = [9.0, 3.0, 30.0]
+// EXPECT: g2 = [3.0, 1.0, 10.0]

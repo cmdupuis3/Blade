@@ -367,9 +367,11 @@ type private ModuleFacts =
       /// `ArraysReadOnly`; merged modules, functions, callable bodies, `mut`
       /// parameters and lowered let-rec writes included). Without one no
       /// value a deferred map reads can change after it is read, so rerunning
-      /// it at its print yields its first-forcing cells -- half of the
-      /// certificate under which a sole-read map may stay fused into its fold
-      /// (gap G60 (b); soleReadModuleOperand).
+      /// it at its print yields its first-forcing cells. (It was half of the
+      /// certificate under which a sole-read map stays fused into its
+      /// consumer; under the borrow, gap G60 (b), soleReadModuleOperand now
+      /// reads it only to keep a no-assignment program's emission. The
+      /// snapshot paths still read it.)
       AnyAssignment: bool
       /// Ids whose `IRVar` occurs AT MOST ONCE across the whole module
       /// (bindings, function bodies, callable bodies). A sole-read deferred
@@ -4650,17 +4652,17 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
                  let nm = defaultArg (Map.tryFind rid c.ModuleNames) (string rid)
                  // A DEFERRED MODULE MAP the callee evaluates privately (gap
                  // G75; its inputs are reads of their own, checked here too).
-                 // From main that is the binding's meaning only while main has
-                 // not forced it: once forced, its class value is the stored
-                 // first-forcing snapshot (formalism 10.2), which the private
-                 // evaluation would not read -- refused, fail closed. A call
-                 // from a function body inherits its root call's admission.
-                 if c.DeferredModule.ContainsKey rid then
-                     if not c.InFunction then
-                         match c.ArrSlots.TryGetValue rid with
-                         | true, { Src = APool _ } ->
-                             refuse ($"'{callable.SourceName}' reads the deferred module binding '{nm}', which main forced before this call (a function body evaluates a deferred module map privately; the forced snapshot is not published)")
-                         | _ -> ()
+                 // From main, also AFTER main forced it (borrow round, lane x,
+                 // gap G75 (2); it was refused, fail closed): the class value
+                 // is then the stored first-forcing snapshot (formalism 10.2),
+                 // and under the borrow rule no write to the map's inputs can
+                 // separate that force from this call (a call of a function
+                 // that reads the map is a use of it), so the private
+                 // evaluation reads the same cells; it cannot fail where the
+                 // force did not (the same inputs), and the print is main's
+                 // force's. The C++ lane's function body evaluates it
+                 // privately the same way (G75).
+                 if c.DeferredModule.ContainsKey rid then ()
                  else
                  refuse ($"'{callable.SourceName}' reads the module binding '{nm}', which is not a stored scalar or statically shaped array at this call")
      | _ -> ())
@@ -7353,11 +7355,12 @@ and private consumeArrOperand (c: Ctx) (e: IRExpr) : ArrVal =
     match e with
     | IRVar (id, _) when not (c.Facts.ReadOnce.Contains id) -> materializeExpr c e
     // A PARTIAL reader retains the in-place consumption only when nothing
-    // can tell: no assignment anywhere (the print's rerun reads the same
-    // cells) and a producer that cannot fail (no unread cell's failure to
-    // move) -- otherwise the whole map is stored at the statement.
+    // can tell: a producer that cannot fail (no unread cell's failure to
+    // move) -- otherwise the whole map is stored at the statement. (Where
+    // the program assigns, also only where the map does not print:
+    // soleReadModuleOperand.)
     | IRVar (id, _) when c.BindingValues.ContainsKey id ->
-        soleReadModuleOperand c id e (not c.Facts.AnyAssignment && producerCannotFail c id)
+        soleReadModuleOperand c id e (producerCannotFail c id)
     | _ -> emitArr c e
 
 /// A LOCAL deferred let (an operand IRLift hoisted out of its consumer, a
@@ -7434,13 +7437,14 @@ and private tupleNeedsMemberOrderLl (c: Ctx) (elems: IRExpr list) : bool =
     (ls |> List.exists structural) || (ls |> List.filter leafMayFail |> List.length) >= 2
 
 /// consumeArrOperand for a consumer that reads EVERY cell of the operand and
-/// cannot fail itself (prodsum): the retention certificate is then only "no
-/// assignment anywhere" (soleReadModuleOperand).
+/// cannot fail itself (prodsum): the certificate is then always granted
+/// (soleReadModuleOperand still stores a printed operand where the program
+/// assigns).
 and private consumeArrOperandAllTotal (c: Ctx) (e: IRExpr) : ArrVal =
     consumePrereqs c e
     match e with
     | IRVar (id, _) when not (c.Facts.ReadOnce.Contains id) -> materializeExpr c e
-    | IRVar (id, _) when c.BindingValues.ContainsKey id -> soleReadModuleOperand c id e (not c.Facts.AnyAssignment)
+    | IRVar (id, _) when c.BindingValues.ContainsKey id -> soleReadModuleOperand c id e true
     | _ -> emitArr c e
 
 /// consumeArrOperand for a consumer that reads every cell, cannot fail
@@ -7453,7 +7457,7 @@ and private consumeArrOperandAnyOrderTotal (c: Ctx) (e: IRExpr) : ArrVal =
     match e with
     | IRVar (id, _) when not (c.Facts.ReadOnce.Contains id) -> materializeExpr c e
     | IRVar (id, _) when c.BindingValues.ContainsKey id ->
-        soleReadModuleOperand c id e (not c.Facts.AnyAssignment && producerCannotFail c id)
+        soleReadModuleOperand c id e (producerCannotFail c id)
     | _ -> emitArr c e
 
 /// The deferred module map `id` cannot fail -- its WHOLE evaluation: its value
@@ -7498,25 +7502,54 @@ and private producerCannotFail (c: Ctx) (id: IRId) : bool =
 /// G60 (b)). A function body's PRIVATE map (G75) that cannot be stored at its
 /// statement (a read inside a loop scope of the body) is refused instead.
 ///
-/// `retainFused` is the caller's CERTIFICATE that consuming in place is
-/// indistinguishable from the force (a fold: no assignment anywhere in the
-/// program, so nothing the map reads changes before the print's rerun, and a
-/// fold kernel and seed that cannot fail, so the first failing cell is the
-/// producer's own, in the same ascending order): then the fused consumption
-/// (no pool) is kept -- the fastest form. A PARTIAL reader (`g(0)`) never
-/// has one: the force evaluates every cell at the statement (C++ and the
-/// interpreter), so a failing cell it does not read must fail there.
+/// `retainFused` is the caller's CERTIFICATE that consuming in place cannot
+/// move a failure: a consumer (fold kernel and seed) that cannot fail, and
+/// for a consumer that reads only some cells or reads them in another order,
+/// a producer that cannot fail -- so the first failing cell is the
+/// producer's own, in the same ascending order. With it the operand is
+/// consumed in place (no pool) -- the fastest form -- and marked forced, so
+/// it prints as the C++ lane's force makes it print.
+/// - In a program with NO assignment anywhere that is today's emission: the
+///   print re-runs the producer at the end of main (emitPrints), so a
+///   printed sole read is evaluated twice where the C++ lane stores it once
+///   (a recorded cost, gap G60 (b); left as it is).
+/// - In a program that ASSIGNS (gap G60 (b), the borrow round): the borrow
+///   (formalism 10.2) refuses a write to storage an uncomputed value reads
+///   while a use of it follows, so consuming in place reads the cells the
+///   force would; but a re-run at the print must not be added there (this
+///   lane never evaluates a map more often than the C++ lane does). So it is
+///   consumed in place only where the binding does NOT print -- the print
+///   selection excludes it (printedAtEnd) -- and no snapshot is taken
+///   (markForcedUnstored); where it prints it is stored once, below, as the
+///   C++ lane stores it. The certificate's old "no assignment anywhere" half
+///   (ModuleFacts.AnyAssignment) stored it in every assigning program.
 and private soleReadModuleOperand (c: Ctx) (id: IRId) (e: IRExpr) (retainFused: bool) : ArrVal =
     match c.ArrSlots.TryGetValue id with
     | true, { Src = APool _ } -> emitArr c e
-    | _ when retainFused ->
+    | _ when retainFused && not c.Facts.AnyAssignment ->
         markForced c id
+        emitArr c e
+    | _ when retainFused && not (printedAtEnd c id) ->
+        markForcedUnstored c id
         emitArr c e
     | _ when forceHoistable c id -> materializeExpr c e
     | _ ->
         refusePrivateUnhoistable c id
         markForced c id
         emitArr c e
+
+/// Would module binding `id`, once marked forced, print at the end of main?
+/// emitPrints' `wanted` (the `--print` selection, CodeGenState.printSelection;
+/// no selection prints every non-internal name). Fails toward "prints": a
+/// binding whose name this context does not know (a function body's slot
+/// tables) counts as printed, so it is stored.
+and private printedAtEnd (c: Ctx) (id: IRId) : bool =
+    match Map.tryFind id c.ModuleNames with
+    | None -> true
+    | Some nm ->
+        match Blade.CodeGenState.printSelection () with
+        | Some names -> Set.contains nm names
+        | None -> not (Blade.CodeGen.isInternalBindingName nm)
 
 /// A function body forces a PRIVATE deferred module map (G75) only where it
 /// can store it with the frame's lifetime at the body's current statement
@@ -7892,6 +7925,14 @@ and private markForced (c: Ctx) (id: IRId) : unit =
     elif c.Forced.Add id then
         markForcedChildren c id
         persistForced c id
+
+/// markForced for a sole read consumed FUSED in an assigning program
+/// (soleReadModuleOperand): marked and its children forced as by markForced,
+/// but no snapshot of its own -- it is used only where the print selection
+/// excludes the binding, so nothing reads it after this consumption.
+and private markForcedUnstored (c: Ctx) (id: IRId) : unit =
+    if c.InlinedCallee > 0 && not c.InFunction then markForced c id
+    elif c.Forced.Add id then markForcedChildren c id
 
 /// THE FORCED SNAPSHOT (gap G199, formalism 10.2): a deferred module binding
 /// forced under its own name holds the cells of its FIRST forcing event --
@@ -9173,8 +9214,9 @@ and private emitReduceCore (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (init
         // stored there instead (gap G60 (b), soleReadModuleOperand), so the
         // print reads the first-forcing cells.
         | IRVar (id, _) when c.BindingValues.ContainsKey id ->
-            // the retention certificate: no assignment anywhere, a total
-            // fold kernel and seed (IRTotality's closed whitelist)
+            // the retention certificate: a total fold kernel and seed
+            // (IRTotality's closed whitelist); where the program assigns,
+            // soleReadModuleOperand also stores a printed operand
             // The DEFERRED facts go to the audit too (review
             // codex-diff-W4B-B-2 finding 2): a kernel or seed that reads an
             // array this lane still holds as a producer -- a deferred map
@@ -9196,7 +9238,7 @@ and private emitReduceCore (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (init
                     | None -> true
                     | Some s -> (Blade.IRTotality.walk resolveCallable noDeferred isDeferred Map.empty Map.empty Set.empty Set.empty Set.empty s) |> Result.isOk
                 kOk && sOk
-            soleReadModuleOperand c id arrExpr (not c.Facts.AnyAssignment && consumerTotal ())
+            soleReadModuleOperand c id arrExpr (consumerTotal ())
         | _ -> emitArr c arrExpr
     let cl =
         match resolveCallable kernelExpr with

@@ -1,4 +1,6 @@
-// TEST: A Fold Evaluates Its Range And Deferred Operands In Position Order
+// TEST: A Fold Evaluates Its Range And Deferred Operands In Position Order (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G209).
 // Gap G209 (round 4 wave 10 lane d; Codex diff review): the successful twin of functions/1054-1055.
 // The range bound `mark(log, 2)` writes log(0) = 2; the deferred map q reads log(0) in its cells.
 // In r1 the range (operand 1) is evaluated before q (operand 2) is forced, so q reads 2:
@@ -15,5 +17,4 @@ let q1 = method_for(xs) <@> lambda(a) -> a + log1(0)
 let r1 = reduce(method_for(0..mark(log1, 2), q1) <@> lambda(i, v) -> i + v, (+), 0, axes = 2)
 let q2 = method_for(xs) <@> lambda(a) -> a + log2(0)
 let r2 = reduce(method_for(q2, 0..mark(log2, 2)) <@> lambda(v, i) -> i + v, (+), 0, axes = 2)
-// EXPECT: r1 = 55
-// EXPECT: r2 = 35
+// ERROR: BL4005 @ 16:31

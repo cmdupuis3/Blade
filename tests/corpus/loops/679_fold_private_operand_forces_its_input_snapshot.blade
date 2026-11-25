@@ -1,4 +1,6 @@
-// TEST: Fold Private Operand Forces Its Input Snapshot
+// TEST: Fold Private Operand Forces Its Input Snapshot (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G199).
 // Gap G199 (round 4 wave 7): a fold over q (a deferred map of the deferred
 // map p of the deferred map d) evaluates p PRIVATELY, and that evaluation
 // forces d under its own name: d holds its cells from the fold on, so the
@@ -11,6 +13,4 @@ let q = method_for(p) <@> lambda(v) -> v * v
 let r = reduce(q, (+), 0.0)
 x(0) = 10.0
 let z = d(0)
-// EXPECT: r = 83.0
-// EXPECT: z = 2.0
-// EXPECT: d = [2.0, 4.0, 6.0]
+// ERROR: BL4005 @ 13:1

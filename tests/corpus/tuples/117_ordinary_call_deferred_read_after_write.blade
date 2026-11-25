@@ -1,4 +1,6 @@
-// TEST: Ordinary Call Deferred Read After Write
+// TEST: Ordinary Call Deferred Read After Write (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, the direct-name twin of tuples/115: `seen(0)` read after the bump.
 // ----------------------------------------------------------------------------
@@ -14,7 +16,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
 }
 function h(k: Int64, s: Int64) -> Int64 = k + s
 let r = h(bump(cnt), seen(0))
-// EXPECT: r = 12
-// EXPECT: cnt = [1]
-// EXPECT: seen = [11]
-// EXPECT: seen2 = [11]
+// ERROR: BL4005 @ 17:11

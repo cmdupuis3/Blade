@@ -1,6 +1,10 @@
-// TEST: a function-body closure capturing a deferred module map is refused (rejects)
-// Gap G279: h is formed before anything forces d in f0's body, so the C++
-// lane cannot forward d to it; refused (BL7004) instead of a BL9002.
+// TEST: a function-body closure capturing a total deferred module map runs
+// Gap G279: h is formed before anything forces d in f0's body. This file was
+// the G279 refusal witness (BL7004, the C++ lane could not forward an
+// unstored d to the closure); the borrow round (lane x) lifted it: d's kernel
+// cannot fail (the closed totality whitelist) and h never leaves f0's direct
+// calls, so d is evaluated privately where h is formed, and every call of h
+// is a use of d under the borrow rule (formalism 10.2).
 type A = Array<Float64 like Idx<1>>
 let mut backing: A = [1.0]
 let d = method_for(backing) <@> lambda(e) -> e * 2.0
@@ -9,6 +13,4 @@ function f0() -> Float64 = {
     h(0)
 }
 let r1 = f0()
-// REJECT-AT: codegen
-// ERROR-CONTAINS: 'd' is a deferred map (a `let` of a map with no `|> compute`)
-// (BL7004 at the driver; the harness pins the #error text: loops/190's note)
+// EXPECT: r1 = 2.0

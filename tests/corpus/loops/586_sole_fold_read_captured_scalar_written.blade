@@ -1,4 +1,6 @@
-// TEST: Sole Fold Read Captured Scalar Written
+// TEST: Sole Fold Read Captured Scalar Written (rejects)
+// BORROW, printing is a use (2026-11-23): now refused at the write (BL4005, formalism 10.2): the map prints, so it
+// is used at the end of the program, after the write. The text below is the schedule it witnessed (gap G60 (b)).
 // ----------------------------------------------------------------------------
 // Gap G60 (b), a SCALAR dependency: c's kernel captures `scale`, c's only
 // reader is a fold inside a kernel (loops/193's shape), and `scale` is
@@ -16,6 +18,4 @@ type W = Idx<2>
 let ws: Array<Float64 like W> = [1.0, 10.0]
 let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
 scale = 3.0
-// EXPECT: scale = 3.0
-// EXPECT: c = [2.0, 4.0, 6.0, 8.0]
-// EXPECT: out = [20.0, 200.0]
+// ERROR: BL4005 @ 19:1

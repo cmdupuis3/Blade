@@ -4448,13 +4448,14 @@ let private hotRowWritingProducerSrc =
     + "let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> {\n    G(0) = G(0) + 1.0\n    Float64(0.0)\n} |> compute\n"
     + "let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), (+), 0.0)\n"
 
-/// G41 finding 17: a pure producer, but the OUTER fold kernel writes G(0),
-/// which the row map reads (fused 1.0 / G=[2.0]; hot-row 0.0 / G=[2.0]).
+/// G41 finding 17: a pure producer, but the OUTER fold kernel writes G(0).
+/// Borrow round (2026-11-23): the row map read G, which the kernel writes during the
+/// traversal -- refused (BL4005); it reads the stored H now, and the write still declines.
 let private hotRowWritingOuterKernelSrc =
-    "type I = Idx<2>\ntype J = Idx<3>\nlet mut G = Float64([0.0])\n"
+    "type I = Idx<2>\ntype J = Idx<3>\nlet mut G = Float64([0.0])\nlet H = Float64([0.0])\n"
     + "function k(a: Float64, b: Float64) -> Float64 = {\n    G(0) = G(0) + 1.0\n    a + b\n}\n"
     + "let p = method_for(range<I>, range<J>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
-    + "let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> G(0), k, 0.0)\n"
+    + "let total = reduce(method_for(p) <@> lambda(row: Array<Float64 like J>) -> H(0), k, 0.0)\n"
 
 /// G41 finding 16: the compact producer bumps the scalar G; the walk reads it
 /// (two-pass 12 / seen 3; row partials 9).
@@ -5981,12 +5982,13 @@ let private compactRowLateScalarSrc =
         .Replace("let ss = ", "let scale = reduce(reduce(pts, (+)), (+)) / 4.0\nlet ss = ")
         .Replace("k(i, j) * k(i, j)", "scale * k(i, j)")
 
-/// A seed that writes the producer through a `mut` parameter: declined.
+/// A seed that writes through a `mut` parameter: declined. Borrow round (2026-11-23): it wrote
+/// the producer k, which the fold's uncomputed cell body reads -- refused (BL4005); it writes an
+/// unrelated `junk` now, and the write still declines.
 let private compactRowWritingSeedSrc =
     compactRowSrc
-        .Replace("let k = ", "let mut k = ")
-        .Replace("let ss = ", "function poke(a: mut Array<Float64 like SymIdx<2, Pts>>) -> Float64 = {\n    a(0, 1) = 1000.0\n    0.0\n}\nlet ss = ")
-        .Replace("lambda(u, v) where omp -> u + v, 0.0)", "lambda(u, v) where omp -> u + v, poke(k))")
+        .Replace("let ss = ", "let mut junk: Array<Float64 like Idx<1>> = [0.0]\nfunction poke(a: mut Array<Float64 like Idx<1>>) -> Float64 = {\n    a(0) = 1000.0\n    0.0\n}\nlet ss = ")
+        .Replace("lambda(u, v) where omp -> u + v, 0.0)", "lambda(u, v) where omp -> u + v, poke(junk))")
 
 /// Path B refusal keeps the square pool (the materialized route owns the omp
 /// census); serial admission is compactionFusedLicensed above.
@@ -10538,11 +10540,12 @@ let private ceSubject (s: string) (d: Blade.Effects.Decision) = d.Subject = s
 let private chainCases () : bool list =
     let src656 = rcCorpus "861_chain_consumer_names_parameter_twice.blade"
     let src657 = rcCorpus "863_top_level_deferred_chain_fold.blade"
+    // Borrow round (2026-11-23): the write `x(0) = 10` that stood here is refused (p is
+    // still used); the decline (p is named outside the chain) does not need it.
     let extentSrc =
-        "let mut x = Int64([1, 2, 3])\n"
+        "let x = Int64([1, 2, 3])\n"
         + "let p = method_for(x) <@> lambda(v) -> v * 2\n"
         + "let t = 0..p(0) |> compute\n"
-        + "x(0) = 10\n"
         + "let q = method_for(p) <@> lambda(v) -> v * v\n"
         + "let r = reduce(q, (+), 0)\n"
     let deeperSrc =
@@ -11341,8 +11344,7 @@ let private chainImportedSources =
       ("Main", "module Main\nimport H\nlet p3 = method_for(H.d) <@> lambda(v) -> v + 1.0\n"
                + "let q3 = method_for(p3) <@> lambda(v) -> v * v\n"
                + "let r3 = reduce(q3, (+), 0.0)\n"
-               + "H.x(0) = 10.0\n"
-               + "let z = H.d(0)\n") ]
+               + "let z = H.d(0)\n") ]  // borrow round: the `H.x(0) = 10.0` before z is refused (H.d is still used)
 
 // Round 4 wave 7 (lane c): the class-closure round of the `top` arm (Codex
 // 18a2f03d) found an extent read of a DEFERRED map in a later fold seed or
@@ -11378,7 +11380,9 @@ let private sfStoredExtentControlSrc =
 // Round 4 wave 8 (lane b, gap G214): the C++ fold over a deferred operand
 // keeps its PRIVATE evaluation only where nothing else names the operand
 // (corpus loops/711); a kernel capture forces it under its own name instead
-// (loops/705). Both recorded under `deferred-capture-force`.
+// (loops/705). Both recorded under `deferred-capture-force`. Borrow round (2026-11-23): the
+// programs below wrote x (or their seed did) while d / p was still used -- refused (BL4005);
+// without the write each decision is recorded the same way.
 let private g214Head =
     "let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
     + "let d = method_for(x) <@> lambda(v) -> v * 2.0\n"
@@ -11387,26 +11391,26 @@ let private g235Head =
     + "let p = method_for(x) <@> lambda(v) -> v * 2.0\n"
 let private wave8DeferredCaptureForceCases () : bool list =
     [ codegenDecisionCase "decision_deferred_capture_force_private_kept"
-          (g214Head + "let p = method_for(d) <@> lambda(v) -> v + 1.0\nlet s = reduce(p, (+), 0.0)\nx(0) = 10.0\nlet w = d(0)\n")
+          (g214Head + "let p = method_for(d) <@> lambda(v) -> v + 1.0\nlet s = reduce(p, (+), 0.0)\nlet w = d(0)\n")
           "deferred-capture-force"
           (fun d -> d.Subject = "s" && not (applied d))
           "declined: no kernel, seed or alias names d, so the fold evaluates it privately"
       codegenDecisionCase "decision_deferred_capture_force_capture_applies"
-          (g214Head + "let p = method_for(d) <@> lambda(v) -> v + Float64(extents(d))\nlet s = reduce(p, (+), 0.0)\nx(0) = 10.0\nlet w = d(0)\n")
+          (g214Head + "let p = method_for(d) <@> lambda(v) -> v + Float64(extents(d))\nlet s = reduce(p, (+), 0.0)\nlet w = d(0)\n")
           "deferred-capture-force"
           (fun d -> d.Subject = "s" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "forced once under their own names"))
           "applied: the kernel captures d, so d is forced once under its own name (G214)"
       // G235 (a), round 4 wave 9: a captured map of the spine forces it, so the
       // fold keeps the spine NAME and folds its snapshot (the checker record)
       codegenDecisionCase "decision_deferred_capture_force_kept_spine_name"
-          (g235Head + "let q = method_for(p) <@> lambda(v) -> v + 1.0\nlet s = reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), { x(0) = 10.0; Float64(0) })\nlet w = p(0)\n")
+          (g235Head + "let q = method_for(p) <@> lambda(v) -> v + 1.0\nlet s = reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), Float64(0))\nlet w = p(0)\n")
           "deferred-capture-force"
           (fun d -> d.Subject = "p" && applied d && d.Evidence |> List.exists (fun e -> e.Contains "snapshot"))
           "applied: the captured q forces the spine p, the fold reads its snapshot (G235)"
       // ... and the twin whose kernel captures nothing reaching p keeps the
       // fused fresh walk of p's producer (no kept-spine record)
       (let name = "decision_deferred_capture_force_no_capture_keeps_fused_walk"
-       match codegenDecisionsOf (g235Head + "let s = reduce(p, lambda(a, b) -> a + b, { x(0) = 10.0; Float64(0) })\nlet w = p(0)\n") with
+       match codegenDecisionsOf (g235Head + "let s = reduce(p, lambda(a, b) -> a + b, Float64(0))\nlet w = p(0)\n") with
        | Error e -> resultLine Fail name e; false
        | Ok ds ->
            match ds |> List.tryFind (fun d -> d.Rule = "deferred-capture-force" && d.Subject = "p") with

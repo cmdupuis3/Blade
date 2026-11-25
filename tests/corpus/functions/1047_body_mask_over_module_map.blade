@@ -5,14 +5,17 @@
 // COPY (`q |> compute`) or a MASK over it evaluates its own map form there --
 // its kernel's captures forced first, as any map's. The C++ lane named the
 // module binder, which nothing declared (BL9002).
+// BORROW (2026-11-23): the write below would be refused (BL4005, formalism 10.2) while an uncomputed
+// map over it (d) is still used: d is copied before the write (the old pin, 103, read d after it).
 // ============================================================================
 type R = Idx<3>
 let mut x: Array<Int64 like R> = [1, 2, 3]
 let d = method_for(x) <@> lambda(v) -> 10 / v
 function f() -> Int64 = {
     let a = mask(d, lambda(v) -> v > 4)
+    let dc = d |> compute
     x(0) = 10
-    d(0) * 100 + extents(a)
+    dc(0) * 100 + extents(a)
 }
 let s = f()
-// EXPECT: s = 103
+// EXPECT: s = 1003

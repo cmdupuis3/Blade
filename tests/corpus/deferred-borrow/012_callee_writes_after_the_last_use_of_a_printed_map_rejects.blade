@@ -1,0 +1,14 @@
+// TEST: borrow a writing call after the last statement use of a map that prints (rejects)
+// R5: g is read by position at top level, so it prints at the end of the
+// program; bump writes x before that use. (The accepted twin is 048.)
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function bump() -> Int64 = {
+    x(0) = x(0) + 1.0
+    0
+}
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+let s = reduce(g, (+))
+let k = bump()
+let x0 = x(0)
+// ERROR: BL4005 @ 11:9

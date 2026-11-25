@@ -1,0 +1,87 @@
+// TEST: A Stage That Keeps Zero Cells Zero And Non-Zero Cells Non-Zero Over An Uncomputed Choice Is Accepted
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4). Over an
+// uncomputed choice a stage runs on each side and "first non-zero" is tested
+// on the STAGED cells (left distribution); over the computed choice the stage
+// maps the chosen cells. The readings agree exactly when the stage cannot
+// change which cells are zero -- f(v) is zero if and only if v is -- and the
+// compiler admits a closed list of such stage bodies. Each Float form of the
+// list over a named and an inline choice, every line beside its computed twin:
+// the parameter itself, a product by a literal with |c| >= 1 (either side, a
+// negative one included), a quotient by a literal with 0 < |c| <= 1, unary
+// minus, a same-type cast, a composition of those, a named function, a
+// lambda that calls two listed stages, a two-stage stack, and `object_for(<$>)`.
+// (An `f >> g` stage over a choice does not compile in the C++ lane on the
+// merged tip -- lane z rows.)
+// `nz` is a choice whose middle cell is zero on BOTH sides: the staged zero
+// (-0.0 under `neg`) is kept on both readings.
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let za: Array<Float64 like I> = [0.0, 0.0, 5.0]
+let zb: Array<Float64 like I> = [7.0, 0.0, 0.0]
+let ident = lambda(z: Float64) -> z
+let dbl = lambda(z: Float64) -> z * 2.0
+let ldbl = lambda(z: Float64) -> 2.0 * z
+let flip = lambda(z: Float64) -> z * -3.0
+let one = lambda(z: Float64) -> z * 1.0
+let byhalf = lambda(z: Float64) -> z / 0.5
+let byneg = lambda(z: Float64) -> z / -1.0
+let neg = lambda(z: Float64) -> -z
+let same = lambda(z: Float64) -> Float64(z)
+let mix = lambda(z: Float64) -> -(z * 2.0) / 0.25
+function twice(z: Float64) -> Float64 = z * 2.0
+let negdbl = lambda(z: Float64) -> dbl(neg(z))
+let ch = cf <|> cf2
+let nz = za <|> zb
+let r1 = ident <$> ch |> compute
+let r1c = ident <$> (ch |> compute) |> compute
+let r2 = dbl <$> ch |> compute
+let r2c = dbl <$> (ch |> compute) |> compute
+let r3 = ldbl <$> (cf <|> cf2) |> compute
+let r3c = ldbl <$> (cf <|> cf2 |> compute) |> compute
+let r4 = flip <$> ch |> compute
+let r4c = flip <$> (ch |> compute) |> compute
+let r5 = one <$> ch |> compute
+let r6 = byhalf <$> ch |> compute
+let r6c = byhalf <$> (ch |> compute) |> compute
+let r7 = byneg <$> ch |> compute
+let r8 = neg <$> ch |> compute
+let r8c = neg <$> (ch |> compute) |> compute
+let r9 = neg <$> nz |> compute
+let r9c = neg <$> (nz |> compute) |> compute
+let r10 = same <$> ch |> compute
+let r11 = mix <$> ch |> compute
+let r11c = mix <$> (ch |> compute) |> compute
+let r12 = twice <$> ch |> compute
+let r13 = negdbl <$> nz |> compute
+let r13c = negdbl <$> (nz |> compute) |> compute
+let r14 = dbl <$> (neg <$> ch) |> compute
+let r14c = dbl <$> (neg <$> (ch |> compute)) |> compute
+let r15 = object_for(<$>) <@> (dbl, ch) |> compute
+// EXPECT: r1 = [1.5, 4.0, -2.0]
+// EXPECT: r1c = [1.5, 4.0, -2.0]
+// EXPECT: r2 = [3.0, 8.0, -4.0]
+// EXPECT: r2c = [3.0, 8.0, -4.0]
+// EXPECT: r3 = [3.0, 8.0, -4.0]
+// EXPECT: r3c = [3.0, 8.0, -4.0]
+// EXPECT: r4 = [-4.5, -12.0, 6.0]
+// EXPECT: r4c = [-4.5, -12.0, 6.0]
+// EXPECT: r5 = [1.5, 4.0, -2.0]
+// EXPECT: r6 = [3.0, 8.0, -4.0]
+// EXPECT: r6c = [3.0, 8.0, -4.0]
+// EXPECT: r7 = [-1.5, -4.0, 2.0]
+// EXPECT: r8 = [-1.5, -4.0, 2.0]
+// EXPECT: r8c = [-1.5, -4.0, 2.0]
+// EXPECT: r9 = [-7.0, -0.0, -5.0]
+// EXPECT: r9c = [-7.0, -0.0, -5.0]
+// EXPECT: r10 = [1.5, 4.0, -2.0]
+// EXPECT: r11 = [-12.0, -32.0, 16.0]
+// EXPECT: r11c = [-12.0, -32.0, 16.0]
+// EXPECT: r12 = [3.0, 8.0, -4.0]
+// EXPECT: r13 = [-14.0, -0.0, -10.0]
+// EXPECT: r13c = [-14.0, -0.0, -10.0]
+// EXPECT: r14 = [-3.0, -8.0, 4.0]
+// EXPECT: r14c = [-3.0, -8.0, 4.0]
+// EXPECT: r15 = [3.0, 8.0, -4.0]

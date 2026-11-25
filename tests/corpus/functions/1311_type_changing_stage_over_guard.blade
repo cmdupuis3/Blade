@@ -1,0 +1,21 @@
+// TEST: A Type-Changing Stage Over A Guard Is The Guard Of The Staged Cells (G317)
+// Lane z (borrow round, 2026-11-24; gap G335, formalism 10.4): a `<$>` stage that moves a zero is refused
+// over an uncomputed guard (BL4022): `cpx` maps 0.0 to 0+1i, so r4 writes it INSIDE the guard.
+// Found while reading lane o's G317 (borrow round, lane x, gap G327): a `<$>` stage over a guard whose body
+// is not one map application was DROPPED in the C++ lane -- a same-type stage silently (`dbl <$> guard(true,
+// cf)` printed cf), a type-changing one as a BL9002 (G317). The stage now takes the law's form (formalism
+// 10.1, 10.4 left zero): `f <$> guard(p, c)` is `guard(p, f <$> c)` -- the staged cells where p holds, the
+// zero of the RESULT where it does not (f is never applied to a zero cell).
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let positive = lambda(z: Float64) -> z > 0.0
+let toInt = lambda(z: Float64) -> Int64(floor(z))
+let cpx = lambda(z: Float64) -> complex(z, 1.0)
+let r1 = positive <$> guard(true, cf) |> compute
+let r2 = positive <$> guard(false, cf) |> compute
+let r3 = toInt <$> guard(true, cf) |> compute
+let r4 = guard(true, cpx <$> cf) |> compute
+// EXPECT: r1 = [true, false, false]
+// EXPECT: r2 = [false, false, false]
+// EXPECT: r3 = [1, 0, -2]

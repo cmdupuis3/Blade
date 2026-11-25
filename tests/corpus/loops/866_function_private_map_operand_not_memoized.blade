@@ -1,4 +1,6 @@
-// TEST: Function Private Map Operand Not Memoized
+// TEST: Function Private Map Operand Not Memoized (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G257, G75).
 // Gap G257, round 4 wave 9 (Codex diff review round 2; pre-existing): inside
 // a function body the map a takes the deferred module map d as an operand;
 // that evaluation is private (G75) and is never stored under the module name,
@@ -13,4 +15,4 @@ function f() -> Int64 = {
     a(0) * 100 + d(0)
 }
 let s = f()
-// EXPECT: s = 1101
+// ERROR: BL4005 @ 10:1

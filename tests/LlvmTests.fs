@@ -1216,6 +1216,33 @@ let a, b, c, d = object_for(<&!>) <@> (prodsum(s, ct), prodsum(s, st), prodsum(c
      | Error e when e.Contains "the --print selection names 'nope'" -> pass name "refused"
      | Error e -> fail name ($"refused for another reason: {e}")
      | Ok _ -> fail name "emitted a module that prints nothing for the selected typo")
+    // G60 (b), the borrow round: in a program that ASSIGNS, a sole-read map
+    // under its certificate (a transpose of a producer that cannot fail; a
+    // total fold) is consumed in place only where it does NOT print -- the
+    // selection excludes it -- and is stored once where it prints (re-running
+    // it at the print would evaluate it twice where the C++ lane evaluates it
+    // once). It used to be stored in every assigning program.
+    let pools (ll: string) =
+        let needle = "call ptr @blade_alloc_cells("
+        let rec count (i: int) (n: int) =
+            match ll.IndexOf(needle, i) with
+            | -1 -> n
+            | j -> count (j + needle.Length) (n + 1)
+        count 0 0
+    let soleReadPool name (source: string) (selected: string) =
+        match emitUnder [] "facts" source, emitUnder [ "BLADE_PRINT", Some selected ] "facts" source with
+        | Ok all, Ok sel ->
+            let a = pools (instructionsOnly all)
+            let s = pools (instructionsOnly sel)
+            if s = a - 1 then pass name ($"{a} pools printed, {s} with the sole read unprinted")
+            else fail name ($"expected one pool fewer with the sole read unprinted: {a} printed, {s} unprinted")
+        | Error e, _ | _, Error e -> fail name e
+    soleReadPool "an assigning program's unprinted sole transpose read is consumed in place, a printed one stored"
+        "let mut u: Array<Float64 like Idx<2>> = [0.0, 0.0]\nu(0) = 1.0\nlet A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\nlet w = method_for(A) <@> lambda(q) -> if q > 3.0 then q else 0.0\nlet result = transpose(w, [0, 1])\n"
+        "result"
+    soleReadPool "an assigning program's unprinted sole fold read is consumed in place, a printed one stored"
+        "let mut u: Array<Float64 like Idx<2>> = [0.0, 0.0]\nu(0) = 1.0\nlet dkeys: Array<Int64 like Idx<6>> = [0, -1, 0, 1, -1, 1]\nlet dgk = group_keys(dkeys)\nlet dsizes = extents(dgk)\nlet dtotal = reduce(dsizes, (+))\n"
+        "dtotal"
 
     printSubHeader "the whole switch"
     // FACTS=off must return the lane to the shape that passed its differential
@@ -2194,9 +2221,10 @@ let one = contains(evens, Int64(44))
      | Error e -> fail "g57_ordered_call_nested_in_an_expression_refuses" ("refused for another reason: " + e)
      | Ok _ -> fail "g57_ordered_call_nested_in_an_expression_refuses" "emitted (the hoisted force would run before the cast)")
     // G75: a function body evaluates a deferred module map privately; a call
-    // from main AFTER main forced the map is refused by name (the forced
-    // snapshot is the class value, which the private evaluation would not
-    // read), and one BEFORE any force is taken.
+    // from main BEFORE any force is taken, and one AFTER main forced the map
+    // is taken too (borrow round, lane x: under the borrow rule no write can
+    // separate main's force from the call, so the private evaluation reads
+    // the snapshot's cells; it was refused by name).
     let g75 (forceFirst: bool) =
         "type Row = Idx<3>\n"
         + "let z: Array<Int64 like Row> = [1, 2, 3]\n"
@@ -2205,10 +2233,9 @@ let one = contains(evens, Int64(44))
         + (if forceFirst then "let w = lazy(0) + lazy(2)\n" else "")
         + "let one = at(1)\n"
     (match emitUnder [] "facts" (g75 true) with
-     | Error e when e.Contains "reads the deferred module binding 'lazy', which main forced before this call" ->
-         pass "g75_call_after_main_forced_the_map_refuses" "refused by name"
-     | Error e -> fail "g75_call_after_main_forced_the_map_refuses" ("refused for another reason: " + e)
-     | Ok _ -> fail "g75_call_after_main_forced_the_map_refuses" "emitted")
+     | Ok ll when ll.Contains "define internal i64 @bl_at_" -> pass "g75_call_after_main_forced_the_map_is_taken" "taken (out-of-line `at`)"
+     | Ok _ -> fail "g75_call_after_main_forced_the_map_is_taken" "no out-of-line `at` in the emitted .ll"
+     | Error e -> fail "g75_call_after_main_forced_the_map_is_taken" e)
     (match emitUnder [] "facts" (g75 false) with
      | Ok ll when ll.Contains "define internal i64 @bl_at_" -> pass "g75_function_reads_unforced_map_privately" "taken (out-of-line `at`)"
      | Ok _ -> fail "g75_function_reads_unforced_map_privately" "no out-of-line `at` in the emitted .ll"
@@ -4554,9 +4581,12 @@ let private mustNativeFixtures : (string * string) list =
       "loops", "599_compute_operand_force_prints_deferred_map.blade"
       // A root call's bare deferred argument forced at its own position,
       // after an earlier argument's write (gap G304): a refusal would hide a
-      // regression of the ordered path behind the C++ fallback.
-      "tuples", "065_call_bare_deferred_alias_side_effect_order.blade"
-      "tuples", "082_inlined_call_bare_deferred_alias_side_effect_order.blade" ]
+      // regression of the ordered path behind the C++ fallback. Borrow round
+      // (2026-11-23): tuples/065 and 082 wrote cnt, which the later bare alias
+      // reads -- (rejects) probes now; their twins 213 and 214 write UNRELATED
+      // storage, so the same ordered path (out of line and inlined) runs.
+      "tuples", "213_call_bare_deferred_alias_after_unrelated_write.blade"
+      "tuples", "214_inlined_call_bare_deferred_alias_after_unrelated_write.blade" ]
 
 let runLlvmMustNativeTestsFor (categories: string list) : BlockResult =
     let block = "LLVM Must-Native"

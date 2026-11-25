@@ -1,0 +1,29 @@
+// TEST: A Stage Over A Stored Array Stores Its Own Result Type
+// ============================================================================
+// Borrow round, lane o (the borrow oracle's NO-WRITES finding, functions/967 and
+// 987): a `<$>` stage's result cells have the STAGE's element type, whatever the
+// input's -- Bool from a number, a number from Bool, an integer from a float and
+// the reverse, a narrower float, complex from real. Here the input is a stored
+// array. Pins from the C++ lane.
+// ============================================================================
+let cf: Array<Float64 like Idx<2>> = [1.5, -2.0]
+let cb: Array<Bool like Idx<2>> = [true, false]
+let ci: Array<Int64 like Idx<2>> = [3, -4]
+let positive = lambda(z: Float64) -> z > 0.0
+let number = lambda(v: Bool) -> Float64(v)
+let trunc = lambda(z: Float64) -> Int64(floor(z))
+let half = lambda(k: Int64) -> Float64(k) * 0.5
+let narrow = lambda(z: Float64) -> Float32(z)
+let lift = lambda(z: Float64) -> complex(z, 1.0)
+let r_bool = positive <$> cf |> compute
+let r_num = number <$> cb |> compute
+let r_int = trunc <$> cf |> compute
+let r_flt = half <$> ci |> compute
+let r_f32 = narrow <$> cf |> compute
+let r_cpx = lift <$> cf |> compute
+// EXPECT: r_bool = [true, false]
+// EXPECT: r_num = [1.0, 0.0]
+// EXPECT: r_int = [1, -2]
+// EXPECT: r_flt = [1.5, -2.0]
+// EXPECT: r_f32 = [1.5, -2.0]
+// EXPECT: r_cpx = [(1.5,1.0), (-2.0,1.0)]

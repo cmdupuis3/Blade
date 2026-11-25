@@ -1,4 +1,6 @@
-// TEST: Fold Spine Forced By Captured Alias Writing Seed
+// TEST: Fold Spine Forced By Captured Alias Writing Seed (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G235).
 // Gap G235 (a), round 4 wave 9: the fold kernel captures p2, a top-level
 // alias of the spine p (one alias class, formalism 10.2). The capture forces
 // the class before the traversal, so the fold reads the snapshot of p after
@@ -8,6 +10,4 @@ let p = method_for(x) <@> lambda(v) -> v * 2.0
 let p2 = p
 let s = reduce(p, lambda(a, b) -> a + b + p2(0), { x(0) = 10.0; Float64(0) })
 let w = p(0)
-// EXPECT: p2 = [2.0, 4.0, 6.0]
-// EXPECT: s = 18.0
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 10:1

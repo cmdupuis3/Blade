@@ -498,9 +498,20 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
 /// order into the root env (keyed by the binding's globally-unique IRId -- the
 /// SSA scoping discipline in Interp/Value.fs), then print. Raising evaluators
 /// propagate out to runProgram's handler.
+///
+/// `printDeferred` (the borrow oracle, under an evaluation reading): the
+/// names of the top-level uncomputed bindings that print -- the set the
+/// interpreter's own schedule prints, so a binding prints under a reading
+/// exactly when it prints today (COMMON R5 as rewritten: printing is a use).
+/// Under reading A the binding prints the cells evaluated at its binding;
+/// under reading B it is evaluated at the END of the program, from the inputs
+/// as they are then (the print is its last use). None under a reading: no
+/// uncomputed binding prints. The third result is the names of the
+/// uncomputed bindings this run printed.
 let private execProgram (state: Core.InterpState) (merged: IRModule) (program: IRProgram)
                         (testName: string) (memoIn: SessionMemo)
-                        (printOnly: Set<string> option) : InterpResult * SessionMemo =
+                        (printOnly: Set<string> option) (printDeferred: Set<string> option)
+                        : InterpResult * SessionMemo * Set<string> =
     // Display frames are per-RUN state (their `meta.id` ordinals restart), so
     // a re-run of the same session produces the same ids and the editor's plot
     // panel updates its entries in place instead of appending duplicates.
@@ -641,6 +652,26 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     let forcedOwn = System.Collections.Generic.HashSet<IRId>(state.ForcedDeferred)
     aliasClasses |> Map.iter (fun m cls ->
         if cls |> List.exists forcedOwn.Contains then state.ForcedDeferred.Add m |> ignore)
+    // Under an evaluation reading an uncomputed binding prints exactly when
+    // it prints today (`printDeferred`, the oracle passes today's set); with
+    // no set given (the knob alone), none prints.
+    let printForced =
+        if state.Reading = ReadingToday then state.ForcedDeferred
+        else
+            match printDeferred with
+            | None -> System.Collections.Generic.HashSet<IRId>()
+            | Some names ->
+                let ids = System.Collections.Generic.HashSet<IRId>()
+                for b in merged.Bindings do
+                    if names.Contains b.Name then
+                        ids.Add b.Id |> ignore
+                        // reading B: the print is the last use -- evaluated
+                        // now, from the inputs as they are at the end
+                        if state.Reading = ReadingAtUse then
+                            match envTryFind root b.Id with
+                            | Some cell when cell.V.IsVDeferred -> cell.V <- Loops.force state root cell.V
+                            | _ -> ()
+                ids
     let lookup (id: IRId) : Value option =
         let own = match envTryFind root id with Some cell -> Some cell.V | None -> None
         match own, Map.tryFind id aliasClasses with
@@ -670,9 +701,16 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
             let ambient = Blade.CodeGenState.printSelection ()
             // The ambient pin is the user's `--print`: a name that would
             // print nothing is refused, as codegen refuses it (BL7004).
-            ambient |> Option.iter (Print.checkAmbientSelection state.ForcedDeferred merged)
+            ambient |> Option.iter (Print.checkAmbientSelection printForced merged)
             ambient
-    Print.printBindingsOnly testName lookup state.ForcedDeferred merged printOnly sb
+    Print.printBindingsOnly testName lookup printForced merged printOnly sb
+    let printedDeferred =
+        let deferredIds = Blade.CodeGen.computeDeferredIds merged.Bindings
+        merged.Bindings
+        |> List.filter (fun b -> deferredIds.Contains b.Id && printForced.Contains b.Id
+                                 && (match printOnly with Some only -> only.Contains b.Name | None -> true))
+        |> List.map (_.Name)
+        |> Set.ofList
 
     // The memo this run hands to its successor: every top-level binding that
     // holds carryable data, under the type it holds it at. Bindings that were
@@ -695,7 +733,8 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
        // Filled in by the caller, which can see the session's declarations.
        MutationFree = memoIn.MutationFree
        FrameEmitters = Set.ofSeq frameEmitters
-       Frames = outFrames |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq })
+       Frames = outFrames |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq },
+     printedDeferred)
 
 /// Run a lowered program under the tree-walking interpreter, mapping each
 /// outcome onto the exit-code protocol above. The whole run executes on the
@@ -708,8 +747,20 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
 /// for a one-shot run. The returned memo is meaningful only on ExitOk -- any
 /// other outcome hands back `emptyMemo`, so a failed or partially-executed run
 /// can never seed the next one.
-let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits)
-                   (memoIn: SessionMemo) (printOnly: Set<string> option) : InterpResult * SessionMemo =
+///
+/// This form takes the evaluation reading of uncomputed array bindings
+/// explicitly (the borrow oracle compares two readings in one process);
+/// `runProgramMemo` below reads it from BLADE_INTERP_READING.
+let rec runProgramMemoReading (reading: DeferReading) (program: IRProgram) (testName: string) (limits: InterpLimits)
+                              (memoIn: SessionMemo) (printOnly: Set<string> option) : InterpResult * SessionMemo =
+    let (r, memo, _) = runProgramCore reading None program testName limits memoIn printOnly
+    (r, memo)
+
+/// The run itself: `runProgramMemoReading` plus the oracle's print set in and
+/// the printed uncomputed binding names out (execProgram's `printDeferred`).
+and runProgramCore (reading: DeferReading) (printDeferred: Set<string> option) (program: IRProgram) (testName: string)
+                   (limits: InterpLimits) (memoIn: SessionMemo) (printOnly: Set<string> option)
+                   : InterpResult * SessionMemo * Set<string> =
     Blade.Runtime.runOnLargeStack (fun () ->
         // The program's declaration spans (lowering attached them, gap G76):
         // this flow may not be the one that lowered (the interpreter
@@ -731,40 +782,57 @@ let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits
             // here and restored on exit. Harmless for a pure-scalar run.
             let savedCtx = Blade.IR.setCallablesContext (Blade.IRPrint.buildCallablesTableForModule merged)
             try
-                let state = Core.makeState merged limits
+                let state = Core.makeStateWith reading merged limits
                 // Wire the M2 loop/array backend (Interp/Loops.fs).
                 let hooks : Core.InterpHooks =
                     { EvalArrayNode = Loops.evalArrayNode
                       Force = Loops.force }
                 state.Hooks <- Some hooks
                 stateRef.Value <- Some state
-                execProgram state merged program testName memoIn printOnly
+                execProgram state merged program testName memoIn printOnly printDeferred
             finally
                 Blade.IR.restoreAnalysisContext savedCtx
         with
         | InterpPanic (code, msg, file, line) ->
             let frames = match stateRef.Value with Some st -> Core.capturedFrames st | None -> []
-            ({ ExitCode = ExitPanic; Stdout = ""; Stderr = formatPanic code msg file line frames }, emptyMemo)
+            ({ ExitCode = ExitPanic; Stdout = ""; Stderr = formatPanic code msg file line frames }, emptyMemo, Set.empty)
         | Core.InterpUnsupported feature ->
-            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo)
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo, Set.empty)
         // Array layer's own "not yet interpreted" signal: ArrayOps compiles
         // before Core, so it raises its own ArrayOpUnsupported instead, which
         // must SKIP-classify identically (Interp/ArrayOps.fs CONTRACT NOTE (2)).
         | ArrayOps.ArrayOpUnsupported feature ->
-            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo)
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo, Set.empty)
         | Print.PrintUnsupported feature ->
-            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo)
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo, Set.empty)
         // Scalar-numerics layer's own signal, on the same footing and for the
         // same reason (Numerics.fs compiles before Core, so it cannot raise
         // InterpUnsupported): a complex intrinsic this build cannot reproduce
         // bit-exactly is a gap in the INTERPRETER, not a fault in the program.
         | Numerics.NumericsUnsupported feature ->
-            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo)
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo, Set.empty)
         | ex ->
-            ({ ExitCode = ExitInterpBug; Stdout = ""; Stderr = $"interp-error: {ex.Message}" }, emptyMemo))
+            ({ ExitCode = ExitInterpBug; Stdout = ""; Stderr = $"interp-error: {ex.Message}" }, emptyMemo, Set.empty))
+
+/// `runProgramMemoReading` under the reading BLADE_INTERP_READING selects now.
+let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits)
+                   (memoIn: SessionMemo) (printOnly: Set<string> option) : InterpResult * SessionMemo =
+    runProgramMemoReading (deferReadingFromKnob ()) program testName limits memoIn printOnly
 
 /// The one-shot form: no memo in, memo discarded. Every caller outside the
 /// REPL/notebook session lanes (tests, the differential gate, `blade test
 /// interp`) runs a whole program exactly once and wants this.
 let runProgram (program: IRProgram) (testName: string) (limits: InterpLimits) : InterpResult =
     fst (runProgramMemo program testName limits emptyMemo None)
+
+/// The one-shot form under an explicit evaluation reading (the borrow oracle).
+let runProgramReading (reading: DeferReading) (program: IRProgram) (testName: string) (limits: InterpLimits) : InterpResult =
+    fst (runProgramMemoReading reading program testName limits emptyMemo None)
+
+/// The borrow oracle's one-shot form: an evaluation reading, the set of
+/// uncomputed bindings that print (today's: see execProgram), and the names of
+/// the uncomputed bindings the run printed.
+let runProgramPrinting (reading: DeferReading) (printDeferred: Set<string> option) (program: IRProgram)
+                       (testName: string) (limits: InterpLimits) : InterpResult * Set<string> =
+    let (r, _, printed) = runProgramCore reading printDeferred program testName limits emptyMemo None
+    (r, printed)

@@ -1,0 +1,6 @@
+// TEST: borrow a fold kernel that writes what its uncomputed operand reads (rejects)
+// One traversal: reduce(g, k) reads g per cell, and k writes x, which g reads.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(g, lambda(acc, v) -> { x(0) = x(0) + 1.0; acc + v }, 0.0)
+// ERROR: BL4005 @ 4:1

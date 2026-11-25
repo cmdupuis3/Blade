@@ -1,4 +1,6 @@
-// TEST: A Body Pipeline Over A Deferred Map Re-Forces It Per Statement
+// TEST: A Body Pipeline Over A Deferred Map Re-Forces It Per Statement (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G256, G239).
 // ============================================================================
 // Gap G256 / G239, round 4 wave 9 (lane C, C1; Codex diff review 5f64f352
 // round 3): the composition twin of functions/760 -- an UNFUSED pipeline (a
@@ -22,4 +24,4 @@ function f() -> Int64 = {
     a(0) + z * 0
 }
 let s = f()
-// EXPECT: s = 3
+// ERROR: BL4005 @ 19:1

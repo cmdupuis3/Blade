@@ -1,0 +1,9 @@
+// TEST: borrow a write in the else arm counts too (rejects)
+// The untaken ELSE arm writes x; no lane can tell at compile time which arm
+// runs, so the write may precede g's later use.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+let t = if a > 0.0 then 0 else { x(0) = 5.0; 1 }
+let b = g(0)
+// ERROR: BL4005 @ 6:1

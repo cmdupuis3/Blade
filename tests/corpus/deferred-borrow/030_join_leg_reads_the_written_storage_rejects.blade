@@ -1,0 +1,8 @@
+// TEST: borrow a join whose seed writes what its legs read (rejects)
+// reduce(p <&!> q, k, seed): the shared seed runs once, before the leaves are
+// folded, and writes x, which both uncomputed leaves read.
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let q = method_for(x) <@> lambda(v) -> v + 1.0
+let s = reduce(p <&!> q, (+), { x(0) = x(0) + 1.0; Float64(0) })
+// ERROR: BL4005 @ 6:1

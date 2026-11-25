@@ -1,4 +1,6 @@
-// TEST: Comm Fold Kernel Writes Through A Rebound Local
+// TEST: Comm Fold Kernel Writes Through A Rebound Local (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G41).
 // Gap G41, the rebinding case (Codex re-review of W2-F, finding 9). The fold
 // kernel's `t` starts as fresh scratch, then is REBOUND to a row view of the
 // captured rank-2 `G` (`t = G(0)`: an ordinary assignment, so `t` shares G's
@@ -18,5 +20,4 @@ let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(
                        a + b
                    }, 0.0)
 let g00 = G((0 : K), (0 : K))
-// EXPECT: total = 141149320.0
-// EXPECT: g00 = 521.0
+// ERROR: BL4005 @ 14:1

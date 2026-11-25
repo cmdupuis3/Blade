@@ -1,4 +1,6 @@
-// TEST: a function-body private map re-forced after its input is written (aborts)
+// TEST: a function-body private map re-forced after its input is written (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G235).
 // Gap G235 (b), round 4 wave 9 (Codex diff review round 1): the failing twin
 // of loops/861. The second statement's capture re-evaluates d over the written
 // x (x(0) = 0), so d fails (BL8013) there in every lane; a pool kept from the
@@ -12,5 +14,4 @@ function f() -> Int64 = {
     a + b
 }
 let s = f()
-// ABORT: BL8013
-// ABORT: .blade:6
+// ERROR: BL4005 @ 9:1

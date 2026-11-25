@@ -4,13 +4,16 @@
 // p itself is not forced there. The seed reads the copy, the fold walks p
 // (still deferred: nothing forced it) over the unwritten x, and the later
 // read w after the write to x evaluates p over the written x.
+// BORROW (2026-11-23): the write below would be refused (BL4005, formalism 10.2) while an uncomputed
+// map over it (p) is still used: the read takes a copy made before the write, so nothing forces p and it does not
+// print (the old pins, w = 20.0 and p = [20.0, ..], read p after the write).
 let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
 let p = method_for(x) <@> lambda(v) -> v * 2.0
 let t = (p, 1.0)
 let s = reduce(p, (+), t[0](0))
+let pc = p |> compute
 x(0) = 10.0
-let w = p(0)
+let w = pc(0)
 // EXPECT: t = ([2.0, 4.0, 6.0], 1.0)
 // EXPECT: s = 14.0
-// EXPECT: w = 20.0
-// EXPECT: p = [20.0, 4.0, 6.0]
+// EXPECT: w = 2.0

@@ -1,0 +1,15 @@
+// TEST: A Function Body's Ordered Call Reports The Left Argument's Failure First (aborts)
+// Review row T18 (borrow round, lane x): `10 / z` divides by zero (BL8013) and the map `qz` reads
+// out of bounds (BL8006); the arguments are evaluated left to right, so the division fails first,
+// as in the interpreter and the LLVM lane.
+// ABORT: integer division by zero
+// WARN: BL4003
+type Row = Idx<1>
+type Trip = Idx<3>
+let a: Array<Int64 like Row> = [1]
+let big: Array<Int64 like Trip> = [1, 2, 3]
+let z: Int64 = 0
+let qz = method_for(a) <@> lambda(v) -> big(v * 7)
+function hb(k: Int64, p: Array<Int64 like Row>) -> Int64 = k + p(0)
+function run() -> Int64 = hb(10 / z, qz |> compute)
+let r = run()

@@ -1742,13 +1742,15 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
 /// top-level block was BL9002 "'q' was not declared"). The interpreter forces
 /// the same read (Loops.force: a module binding materialized under its own
 /// name joins the print list); the LLVM lane already stores a folded named
-/// choice and prints it.
+/// choice and prints it. A named GUARD is such a wrapper too (lane x3: `let g =
+/// guard(p, m)`, of a map or of a stored array, then `reduce(g, (+))` read an
+/// undeclared `g`): no fold form reads a guard cell by cell either.
 let isDeferredWrapperOperand (ctx: CodeGenContext) (e: IRExpr) : bool =
     let rec go (seen: Set<IRId>) (e: IRExpr) =
         match e with
         | IRVar (id, _) when not (Set.contains id seen) ->
             (match Map.tryFind id ctx.DeferredComputations with
-             | Some (IRChoice _ | IRFallback _) -> true
+             | Some (IRChoice _ | IRFallback _ | IRGuard _) -> true
              | Some (IRVar _ as inner) -> go (Set.add id seen) inner
              | _ -> false)
         | _ -> false
@@ -1859,6 +1861,83 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         | _ -> ()
     walk root
     List.ofSeq ordered
+
+/// THE BY-NAME OPERAND SLOTS of a statement value (review row T18, borrow
+/// round): the positions collectDeferredPositionalReads notes -- a call
+/// argument, the base of a subscript, of a run-time extent and of `contains`,
+/// a prodsum operand -- each handed to `slot`, which answers a replacement or
+/// None (then the operand is rewritten in turn); every other node is rebuilt
+/// around its rewritten children, left to right (evaluation order, so a
+/// stateful `slot` sees the operands in written order). Like the collector it
+/// stops at loop objects and maps (they force their own inputs). It walks the
+/// generic ExprShape children: types and the extents they carry, callable
+/// bodies, module side tables and match patterns are NOT visited -- a callable
+/// body runs at its call, and none of those holds a by-name operand of THIS
+/// statement.
+let rewriteByNameOperands (slot: IRExpr -> IRExpr option) (value: IRExpr) : IRExpr =
+    let rec f (e: IRExpr) : IRExpr voption =
+        let take (a: IRExpr) = match slot a with Some t -> t | None -> rewriteTopDown f a
+        match e with
+        | IRObjectFor _ | IRMethodFor _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _
+        | IRApplyCombinator _ | IRComposeApply _ -> ValueSome e
+        | IRApp (fn, args, info) ->
+            let fn' = rewriteTopDown f fn
+            ValueSome (IRApp (fn', List.map take args, info))
+        | IRIndex (a, idxs, identity) ->
+            let a' = take a
+            ValueSome (IRIndex (a', List.map (rewriteTopDown f) idxs, identity))
+        | IRExtent (a, dim) when not (extentIsStatic a dim) -> ValueSome (IRExtent (take a, dim))
+        | IRContains (a, v) ->
+            let a' = take a
+            ValueSome (IRContains (a', rewriteTopDown f v))
+        | IRProdSum es -> ValueSome (IRProdSum (List.map take es))
+        | _ -> ValueNone
+    rewriteTopDown f value
+
+/// The ids a statement's pre-pass forces (`forced`) closed over the deferred
+/// alias chains: forcing an alias forces its source under the source's own
+/// name first (forceDeferredArrayInput), so a later `src |> compute` in the
+/// same statement names a declared holder.
+let forcedAliasClosure (ctx: CodeGenContext) (forced: IRId list) : Set<IRId> =
+    let rec go (acc: Set<IRId>) (id: IRId) =
+        if acc.Contains id then acc
+        else
+            let acc = acc.Add id
+            let acc =
+                match Map.tryFind id ctx.DeferredAliasOf with
+                | Some root -> go acc root
+                | None -> acc
+            match Map.tryFind id ctx.DeferredComputations with
+            | Some (IRVar (src, _)) -> go acc src
+            | _ -> acc
+    forced |> List.fold go Set.empty
+
+/// A NAMED explicit compute in a by-name slot (T18): `m |> compute` over a
+/// binder m still deferred here and not forced by the statement's own
+/// pre-pass (`excluded`, forcedAliasClosure). Such a slot renders `m` by name
+/// and nothing declares it -- the C++ lane named an undeclared `m` (BL9002)
+/// everywhere but the whole value of a let and the arguments of a statement's
+/// ROOT call (genOrderedCallBinding). A map written in place under its compute
+/// keeps its own rendering and is not one.
+let namedComputeSlotOf (ctx: CodeGenContext) (excluded: Set<IRId>) (e: IRExpr) : (IRId * IRType) option =
+    let rec strip (x: IRExpr) = match x with IRCompute y -> strip y | y -> y
+    match e with
+    | IRCompute _ ->
+        (match strip e with
+         | IRVar (id, ty) when Map.containsKey id ctx.DeferredComputations && not (excluded.Contains id)
+                               && (match ty with ArrayElem _ -> true | _ -> false) -> Some (id, ty)
+         | _ -> None)
+    | _ -> None
+
+/// The named explicit computes a statement holds in its by-name slots, in
+/// written order (namedComputeSlotOf).
+let namedComputeSlotsIn (ctx: CodeGenContext) (excluded: Set<IRId>) (value: IRExpr) : IRId list =
+    let found = System.Collections.Generic.List<IRId>()
+    rewriteByNameOperands (fun a ->
+        match namedComputeSlotOf ctx excluded a with
+        | Some (id, _) -> found.Add id; Some a
+        | None -> None) value |> ignore
+    List.ofSeq found
 
 /// Deferred-computation bindings a KERNEL reads through its CAPTURE list.
 ///

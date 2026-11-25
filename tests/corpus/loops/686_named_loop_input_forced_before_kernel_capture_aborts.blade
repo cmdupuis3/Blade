@@ -1,4 +1,5 @@
 // TEST: a named loop forces its deferred input before its kernel capture (aborts)
+// BORROW, printing is a use (2026-11-23): d and p print, so the program's write moves to an unrelated y.
 // Gap G199 (Codex diff review round 3): forcing p forces its INPUT d before
 // the deferred map h its kernel captures -- the C++ lane forces a map's
 // inputs, then its kernel captures. Both fail (d divides by zero at cell 1, h
@@ -6,12 +7,13 @@
 // The LLVM lane walked the apply loop and kernel first and failed in h.
 type I = Idx<2>
 let mut x: Array<Int64 like I> = [1, 0]
+let mut y: Array<Int64 like I> = [0, 0]
 let d = method_for(x) <@> lambda(v) -> 10 / v
 let h = method_for(x) <@> lambda(v) -> 20 % v
 let l = method_for(d)
 let p = l <@> lambda(v) -> v + h(0)
 let z = p(0)
-x(0) = 2
+y(0) = 2
 // ABORT: BL8013
 // ABORT: -->
-// ABORT: .blade:8
+// ABORT: .blade:10

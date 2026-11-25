@@ -1,0 +1,9 @@
+// TEST: borrow a write and a later use in one top-level block (rejects)
+// Statements of a block run in order: the read g(1) follows the write.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let r = {
+    x(0) = 5.0
+    g(0) + g(1)
+}
+// ERROR: BL4005 @ 4:1

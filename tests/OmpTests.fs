@@ -217,8 +217,11 @@ let private ompDepthCases : (string * string * string) list =
 /// `comm` kernel body is the argument.
 let private g41Pre1 = "type I = Idx<37>\ntype K = Idx<2>\nlet mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
 let private g41Pre2 = "type I = Idx<37>\ntype K = Idx<2>\nlet mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute\n"
-let private g41Fold (body: string) =
-    "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> Float64(i) + G((0 : K), (0 : K)), lambda(a, b) where comm(a, b) -> " + body + ", 0.0)\n"
+/// The borrow round (2026-11-23): a WRITING fixture's map must not read what its fold kernel
+/// writes -- that traversal is refused (BL4005: the kernel writes storage the fold's uncomputed
+/// operand reads). Its map reads only the index; the kernel's write (the subject) is unchanged.
+let private g41FoldW (body: string) =
+    "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> Float64(i), lambda(a, b) where comm(a, b) -> " + body + ", 0.0)\n"
 let private g41Fold1 (body: string) =
     "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> Float64(i) + G((0 : K)), lambda(a, b) where comm(a, b) -> " + body + ", 0.0)\n"
 let private g41WriteCensus = "[omp] requested but emitted serial: the fold kernel writes a captured binding; a map licence does not make the fold race-safe"
@@ -360,11 +363,12 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // kernel writes a captured `let mut` (legal: BL4005 covers parallel
       // bodies only): its applications are ordered side effects, so it is not
       // reorder-licensed -- no Path B team, no lanes, the serial chain, and the
-      // dropped map licence says why. Corpus loops/492 pins the values.
+      // dropped map licence says why. Corpus loops/492 pinned the values (a
+      // (rejects) probe since the borrow round: its map read G; this one reads only i).
       ("map_licence_writing_comm_fold_kernel_stays_serial",
        "type I = Idx<37>\ntype K = Idx<2>\n"
        + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
-       + "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> Float64(i) + G((0 : K)), lambda(a, b) where comm(a, b) -> { G((0 : K)) = G((0 : K)) + 1.0; a + b }, 0.0)\n",
+       + "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> Float64(i), lambda(a, b) where comm(a, b) -> { G((0 : K)) = G((0 : K)) + 1.0; a + b }, 0.0)\n",
        ["[omp] requested but emitted serial: the fold kernel writes a captured binding; a map licence does not make the fold race-safe"],
        ["BLADE_OMP_PARALLEL_NUM_THREADS("; "omp_get_"; "blade_fold::chunk_lo"; "__rlane"; "SIMD_REDUCTION"])
       // The mirror: a `where omp` FOLD over a map whose body writes (the map
@@ -381,10 +385,10 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // blocker 1): a store through a ROW VIEW of the captured G, or through an
       // array a call returned, is a write to G; corpus loops/495 pins values.
       ("map_licence_fold_kernel_writes_through_view_stays_serial",
-       g41Pre2 + g41Fold "{ let t = G((0 : K)); t((0 : K)) = t((0 : K)) + 1.0; a + b }",
+       g41Pre2 + g41FoldW "{ let t = G((0 : K)); t((0 : K)) = t((0 : K)) + 1.0; a + b }",
        [g41WriteCensus], g41NoTeam)
       ("map_licence_fold_kernel_writes_returned_alias_stays_serial",
-       g41Pre1 + "function getG() -> Array<Float64 like K> = G\n" + g41Fold1 "{ let t = getG(); t((0 : K)) = t((0 : K)) + 1.0; a + b }",
+       g41Pre1 + "function getG() -> Array<Float64 like K> = G\n" + g41FoldW "{ let t = getG(); t((0 : K)) = t((0 : K)) + 1.0; a + b }",
        [g41WriteCensus], g41NoTeam)
       // ...and storage the kernel makes itself is LOCAL: these still thread.
       ("map_licence_fold_kernel_local_scalar_threads",
@@ -404,7 +408,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
       // then is rebound to a row VIEW of G -- every later store through `t`
       // writes G. A fresh-to-fresh rebind stays local.
       ("map_licence_fold_kernel_rebound_to_view_stays_serial",
-       g41Pre2 + g41Fold "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}",
+       g41Pre2 + g41FoldW "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}",
        [g41WriteCensus], g41NoTeam)
       ("map_licence_fold_kernel_rebound_fresh_to_fresh_threads",
        g41Pre1 + g41Fold1 "{\n    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    t = method_for(range<K>) <@> lambda(k) -> Float64(1.0) |> compute\n    t((0 : K)) = a + b\n    t((0 : K))\n}",
@@ -415,7 +419,7 @@ let private ompReduceCases : (string * string * string list * string list) list 
        [g41Team], [g41WriteCensus])
       ("map_licence_fold_kernel_callee_fills_captured_stays_serial",
        g41Pre1 + "function fill(buf: mut Array<Float64 like K>, v: Float64) -> Float64 = {\n    buf((0 : K)) = v\n    v\n}\n"
-       + g41Fold1 "{ fill(G, a + b) }",
+       + g41FoldW "{ fill(G, a + b) }",
        [g41WriteCensus], g41NoTeam)      // ---- M14 (gap G25): the fast form INSIDE each Path B chunk ------------
       // A `where omp` builtin-`+` fold over a dot-class body: the team is
       // opened and each thread's chunk is ONE call of the explicit K-lane
@@ -1007,11 +1011,14 @@ let private rowSlotOmpOuter = "lambda(u, v) where omp -> u + v"
 /// MAP carries the thread request, the fold kernel is a serial `comm` kernel
 /// that bumps G(0) once per application, and row i reads G(0) = i in the
 /// serial walk. The row-slot form must decline (else every row would read 0).
-/// Serial value: sum_i sum_j (G(j) + i) = 522 * (0 + .. + 520) = 70710120.
+/// Borrow round (2026-11-23): the rows read the STORED H, not G -- a row map reading the G the
+/// kernel writes is refused (BL4005, the borrow); the write still declines the form. Serial value:
+/// sum_i sum_j (H(j) + i) = 521 * (0 + .. + 520) = 70574660 (was 70710120 with the rows reading G).
 let private rowSlotOuterWriteSrc =
     "type I = Idx<521>\n"
     + "let mut G: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.0 |> compute\n"
-    + "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G(j) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n"
+    + "let H: Array<Float64 like I> = method_for(range<I>) <@> lambda(i) -> 0.0 |> compute\n"
+    + "let s = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> H(j) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n"
     + "    G((0 : I)) = G((0 : I)) + 1.0\n"
     + "    a + b\n"
     + "}, 0.0)\n"
@@ -4616,7 +4623,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
 
         // ---- the outer-kernel-write counterexample, RUN (blocker 1) -------
         // Declined, so the knob is inert: knob on and knob off print the same
-        // serial value 70710120.0 (with the slots, every row would read
+        // serial value 70574660.0 (the rows read the stored H since the borrow round; with the slots, every row would read
         // G(0) = 0 and the total would drop by 135460). Repro build: the
         // licensed default build's Path B threads the same fold kernel.
         (let name = "row_slots_outer_kernel_write_values"
@@ -4640,10 +4647,10 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
              | Ok onOut, Ok offOut ->
                  if stripTiming onOut <> stripTiming offOut then
                      fail name ($"knob on [{stripTiming onOut}] vs off [{stripTiming offOut}]")
-                 elif not ((stripTiming onOut).Contains "s = 70710120.0") then
-                     fail name ($"expected the serial walk's s = 70710120.0, got: {stripTiming onOut}")
+                 elif not ((stripTiming onOut).Contains "s = 70574660.0") then
+                     fail name ($"expected the serial walk's s = 70574660.0, got: {stripTiming onOut}")
                  else
-                     pass name "declined; knob on == knob off == the serial walk (s = 70710120.0)")
+                     pass name "declined; knob on == knob off == the serial walk (s = 70574660.0)")
 
         // ---- gap G41, RUN: writing fold kernels / map bodies stay ordered ---
         // Corpus loops/492 (a `comm` fold kernel writing G, reached through the
@@ -4651,23 +4658,26 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // (a `where omp` fold over a map body that writes). Before the fix the
         // licensed build threaded or laned them: five mt8 runs, five totals.
         // Every build and team size must print the serial total AND counter.
+        // Borrow round (2026-11-23): the maps no longer read G (a map reading the G its fold kernel writes
+        // is refused, BL4005), so the totals are 521 * (0 + .. + 520) = 70574660 (were 141149320, the
+        // interleaving the corpus pinned); the counter g0 = 521 still shows every application ran once.
         let g41Cases =
             let pre = "type I = Idx<521>\ntype K = Idx<2>\n"
             [ ("g41_comm_fold_kernel_write",
                pre + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
-               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K)) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> { G((0 : K)) = G((0 : K)) + 1.0; a + b }, 0.0)\n"
+               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> Float64(i), (+)), lambda(a, b) where comm(a, b) -> { G((0 : K)) = G((0 : K)) + 1.0; a + b }, 0.0)\n"
                + "let g0 = G((0 : K))\n",
-               141149320.0, 521.0)
+               70574660.0, 521.0)
               ("g41_comm_fold_kernel_write_through_view",
                pre + "let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute\n"
-               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K), (0 : K)) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n    let t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}, 0.0)\n"
+               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n    let t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}, 0.0)\n"
                + "let g0 = G((0 : K), (0 : K))\n",
-               141149320.0, 521.0)
+               70574660.0, 521.0)
               ("g41_comm_fold_kernel_write_through_rebound_local",
                pre + "let mut G: Array<Float64 like K, K> = method_for(range<K>, range<K>) <@> lambda(k, l) -> 0.0 |> compute\n"
-               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K), (0 : K)) + Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}, 0.0)\n"
+               + "let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> Float64(i), (+)), lambda(a, b) where comm(a, b) -> {\n    let mut t = method_for(range<K>) <@> lambda(k) -> Float64(0.0) |> compute\n    t = G((0 : K))\n    t((0 : K)) = t((0 : K)) + 1.0\n    a + b\n}, 0.0)\n"
                + "let g0 = G((0 : K), (0 : K))\n",
-               141149320.0, 521.0)
+               70574660.0, 521.0)
               ("g41_omp_fold_over_writing_map",
                pre + "let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> compute\n"
                + "let total = reduce(method_for(range<I>) <@> lambda(i) -> { G((0 : K)) = G((0 : K)) + 1.0; G((0 : K)) + Float64(i) }, lambda(a, b) where omp -> a + b, 0.0)\n"

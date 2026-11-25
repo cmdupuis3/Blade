@@ -1,0 +1,34 @@
+// TEST: A Same-Type Stage Over A Guard Of A Stored Array Is Applied To Every Cell
+// Lane z (borrow round, 2026-11-24; gap G335, formalism 10.4): a `<$>` stage that moves a zero is refused
+// over an uncomputed guard (BL4022): r8 and r9 write `inc` INSIDE the guard (the laws' cells, unchanged).
+// Found while reading lane o's G317 (borrow round, lane x, gap G327): a `<$>` stage over a guard whose body
+// is not one map application was DROPPED in the C++ lane -- a same-type stage silently (`dbl <$> guard(true,
+// cf)` printed cf), a type-changing one as a BL9002 (G317). The stage now takes the law's form (formalism
+// 10.1, 10.4 left zero): `f <$> guard(p, c)` is `guard(p, f <$> c)` -- the staged cells where p holds, the
+// zero of the RESULT where it does not (f is never applied to a zero cell).
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let dbl = lambda(z: Float64) -> z * 2.0
+let inc = lambda(z: Float64) -> z + 1.0
+function twice(z: Float64) -> Float64 = z * 2.0
+let flag = reduce(cf, (+)) < 0.0
+let r1 = dbl <$> guard(true, cf) |> compute
+let r2 = dbl <$> guard(false, cf) |> compute
+let r3 = dbl <$> guard(flag, cf) |> compute
+let r4 = twice <$> guard(true, cf) |> compute
+let r5 = dbl <$> (dbl <$> guard(true, cf)) |> compute
+let m = method_for(cf) <@> lambda(v) -> v + 1.0
+let r6 = dbl <$> guard(true, cf * 2.0) |> compute
+let r7 = dbl <$> guard(true, m) |> compute
+let r8 = guard(true, inc <$> cf) |> compute
+let r9 = guard(false, inc <$> cf) |> compute
+// EXPECT: r1 = [3.0, 0.0, -4.0]
+// EXPECT: r2 = [0.0, 0.0, 0.0]
+// EXPECT: r3 = [3.0, 0.0, -4.0]
+// EXPECT: r4 = [3.0, 0.0, -4.0]
+// EXPECT: r5 = [6.0, 0.0, -8.0]
+// EXPECT: r6 = [6.0, 0.0, -8.0]
+// EXPECT: r7 = [5.0, 2.0, -2.0]
+// EXPECT: r8 = [2.5, 1.0, -1.0]
+// EXPECT: r9 = [0.0, 0.0, 0.0]

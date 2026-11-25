@@ -297,7 +297,15 @@ type EarthArray = Array<Float64 like LatIdx, LonIdx>
   (a tuple of ONLY deferred computations stays deferred; formalism §10.2).
 - A deferred map (a `let` of a map with no `|> compute`) has no storage of its own: writing
   through it, a top-level alias or a view of it, or handing it to a `mut` parameter that is
-  written or to a callback, is BL4005 — bind `|> compute` first. An `if` VALUE selecting between
+  written or to a callback, is BL4005 — bind `|> compute` first. It also BORROWS what it reads
+  (formalism §10.2): from its binding to its last use, the storage it reads (operands, kernel
+  captures, names it reads) is read-only, and a write to it — an element write, a whole
+  reassignment, a writing call or callback, a kernel or seed writing during a traversal of it —
+  while a later use may follow is BL4005 at the write. A top-level map that PRINTS (one read by
+  position, captured, or passed whole at top level) is used at the end of the program, so no
+  write to its inputs may follow its binding at all. Snapshot first (`let c = g |> compute`) or
+  re-apply the loop object after the write (`let f = object_for(k)`, `f <@> x` at each use). An
+  `if` VALUE selecting between
   computed arrays inside a function / lambda / loop body, or one whose arm forces a deferred map
   that nothing forced earlier, is BL6002 — force it before the `if` (formalism §10.2 has the
   exact rule).
@@ -330,6 +338,11 @@ type EarthArray = Array<Float64 like LatIdx, LonIdx>
   contract `a*b + c` to one FMA, and every LICENSED fold is reassociated into lanes /
   `omp simd reduction`); bit-reproducibility is opt-in: `where repro` per function,
   `BLADE_FP_REPRO=1 BLADE_FP_CONTRACT=off` per build.
+- A `<$>` stage over an UNCOMPUTED guard or choice must not move a zero (BL4022, formalism
+  §10.4): over a guard it must map `0.0` to exactly `0.0`, over a choice it must be one of the
+  stages that keep zero cells zero and non-zero cells non-zero (`z * 2.0`, `-z`, a widening
+  cast); otherwise write the stage inside (`guard(p, f <$> c)`, `(f <$> a) <|> (f <$> b)`) or
+  stage the computed value (`f <$> (c |> compute)`).
 - `where` clauses carry kernel metadata: `comm(a, b)` / `anticomm(...)` (interchangeable
   args), `omp(x: n)` (parallelism license, depth-capped), `cuda`, `tdim({...})`. A bare
   `omp` on a `reduce` kernel licenses fold reordering and requires commutativity (else
@@ -448,7 +461,11 @@ to RK4 time-stepping and DP tables (`tests/corpus/recursive-arrays/007`, `008`).
   makes itself (local scalars, fresh scratch arrays, let-rec buffers) are fine anywhere; a
   write through a view or alias of a captured array (`let t = G(0)`) is a write to G. A serial
   write is an ORDERED side effect, so no licence reorders it: a fold whose kernel or deferred
-  map body writes keeps the serial chain in every build and lane (`blade plan` says why).
+  map body writes keeps the serial chain in every build and lane (`blade plan` says why). And
+  no write may land under a BORROW: storage that an uncomputed map still in use reads is
+  read-only until that map's last use, and a map that prints is used at the end of the
+  program (BL4005; a write after the last use of a map that never prints, or to a
+  `|> compute` copy, is fine).
 - **Only a `let mut` is writable from a callable that captures it.** A plain `let` may be
   assigned in the callable that defines it; a nested function, lambda or kernel — and a
   top-level function naming a module binding — that writes a binding it captures, directly or

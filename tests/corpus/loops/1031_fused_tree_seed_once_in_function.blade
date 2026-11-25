@@ -1,14 +1,19 @@
 // TEST: a fused tree in a function body evaluates its shared seed once
 // Gap G277: the same contract inside a callable; the seed writes the caller's
 // array through the mut parameter once.
-function f(x: mut Array<Float64 like Idx<2>>) -> (Float64, Float64) = {
+// BORROW (2026-11-23): a seed writing x, which the uncomputed leaves read, is refused (BL4005,
+// formalism 10.2), so the seed now bumps the caller's counter c, which no leaf reads, through a
+// second mut parameter: c = [1.0] is the one evaluation (the old pins folded the written x).
+function f(x: Array<Float64 like Idx<2>>, c: mut Array<Float64 like Idx<1>>) -> (Float64, Float64) = {
     let p = method_for(x) <@> lambda(v) -> v * 2.0
     let q = method_for(x) <@> lambda(v) -> v + 1.0
-    reduce(p <&!> q, (+), { x(0) = x(0) + 1.0; Float64(0) })
+    reduce(p <&!> q, (+), { c(0) = c(0) + 1.0; Float64(0) })
 }
-let mut y: Array<Float64 like Idx<2>> = [1.0, 2.0]
-let s = f(y)
-let yy = y |> compute
-// EXPECT: y = [2.0, 2.0]
-// EXPECT: s = (8.0, 6.0)
-// EXPECT: yy = [2.0, 2.0]
+let y: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let mut cnt: Array<Float64 like Idx<1>> = [0.0]
+let s = f(y, cnt)
+let yy = cnt |> compute
+// EXPECT: y = [1.0, 2.0]
+// EXPECT: cnt = [1.0]
+// EXPECT: s = (6.0, 5.0)
+// EXPECT: yy = [1.0]

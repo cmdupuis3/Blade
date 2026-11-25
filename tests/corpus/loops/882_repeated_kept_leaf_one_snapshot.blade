@@ -1,4 +1,6 @@
-// TEST: a kept leaf spelled twice folds one snapshot in both positions
+// TEST: a kept leaf spelled twice folds one snapshot in both positions (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G233).
 // Gap G233, round 4 wave 10 (Codex design review, class closure): the tree
 // `(p <&!> p) <&!> q` keeps both occurrences of p (captured by q's kernel);
 // one force under p's own name, both leaves fold that snapshot.
@@ -7,7 +9,4 @@ let p = method_for(x) <@> lambda(v) -> v * 2.0
 let q = method_for(x) <@> lambda(v) -> v + p(1)
 let s = reduce((p <&!> p) <&!> q, (+), { x(0) = 10.0; Float64(0) })
 let w = p(0)
-// EXPECT: x = [10.0, 2.0]
-// EXPECT: p = [2.0, 4.0]
-// EXPECT: s = ((6.0, 6.0), 20.0)
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 9:1

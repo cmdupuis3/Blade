@@ -447,6 +447,13 @@ module Codes =
             // a sequence that ends before the walk closes (child slots nothing
             // fills). The message names which.
             "BL4021", "invalid tree shape"
+            // BL4022: a `<$>` stage over an UNCOMPUTED guard or choice whose two
+            // readings can differ (gap G335, formalism 10.4; src/StageZero.fs):
+            // over a guard the stage must map the exact zero to the exact zero
+            // (a compile-time evaluation), over a choice it must be one of the
+            // stages that cannot change which cells are zero (a closed list);
+            // a nest takes both. Spanned at the stage application.
+            "BL4022", "stage would change a zero of an uncomputed guard or choice"
             // BL5xxx: elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"

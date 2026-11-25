@@ -1,0 +1,39 @@
+// TEST: A Named Guard Of A Stored Array At Module Level, In Each Use Position
+// ============================================================================
+// Borrow round, lane x3 (item 2). `let g = guard(p, cf)` over a STORED array
+// is an uncomputed value (formalism 10.2), `cf` where p holds, else the zeros
+// of cf's shape (10.4). The C++ lane emitted it as a scalar conditional,
+// `(p ? cf : 0.0)` (BL9002, "operands to '?:' have different types"); it now
+// defers like a guard of a map, as IRLift.computeDeferredIds and the
+// interpreter already did. A fold of a named guard (of a stored array or of
+// a map) read the guard by name, undeclared: it is forced first, as a fold of
+// a named choice is. Computed, folded, read by position, a map operand, a
+// zip operand; literal and run-time conditions. Pins by hand.
+// ============================================================================
+let cf: Array<Float64 like Idx<3>> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like Idx<3>> = [9.0, 4.0, 3.0]
+let flag = cf(0) > 1.0
+let g = guard(false, cf)
+let g2 = guard(true, cf)
+let g3 = guard(flag, cf2)
+let gm = guard(flag, method_for(cf) <@> lambda(v) -> v * 3.0)
+let r = g2 |> compute
+let rg = g |> compute
+let s = reduce(g3, (+))
+let s0 = reduce(g, (+))
+let sm = reduce(gm, (+))
+let e = g3(1)
+let e0 = g(1)
+let m = method_for(g3) <@> lambda(v) -> v * 2.0 |> compute
+let m0 = method_for(g) <@> lambda(v) -> v + 1.0 |> compute
+let z = method_for(zip(g3, cf)) <@> lambda(a, b) -> a + b |> compute
+// EXPECT: r = [1.5, 0.0, -2.0]
+// EXPECT: rg = [0.0, 0.0, 0.0]
+// EXPECT: s = 16.0
+// EXPECT: s0 = 0.0
+// EXPECT: sm = -1.5
+// EXPECT: e = 4.0
+// EXPECT: e0 = 0.0
+// EXPECT: m = [18.0, 8.0, 6.0]
+// EXPECT: m0 = [1.0, 1.0, 1.0]
+// EXPECT: z = [10.5, 4.0, 1.0]

@@ -1,0 +1,10 @@
+// TEST: borrow write between two uses (rejects)
+// g is uncomputed over x and used after the write: read at its binding g(0) is
+// 2.0, read at the use it is 10.0. Refused at the write (BL4005).
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+x(0) = 5.0
+let b = g(0)
+// ERROR: BL4005 @ 6:1
+// ERROR-CONTAINS: still used after it

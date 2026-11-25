@@ -1,0 +1,15 @@
+// TEST: A Deferred Map Over A Projection Of A Named Deferred Tuple Fuses Into Its Fold
+// Gap G326 (borrow round, lane x): method_for(t2[0]) <@> k is method_for(g1) <@> k, so the fold over it
+// fuses through both maps and nothing is forced: g1 does not print. The interpreter used to force g1 at
+// the projection (it printed), and the C++ lane named an undeclared array (BL9002).
+type I = Idx<5>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let mut y: Array<Float64 like I> = [1.0, 1.0, 1.0, 1.0, 1.0]
+let g1 = method_for(x) <@> lambda(v) -> v + y(2)
+let g2 = method_for(x) <@> lambda(v) -> v * 2.0
+let t2 = (g1, g2)
+let ta = t2
+let tn = (t2, g1)
+let m = method_for(t2[0]) <@> lambda(v) -> v * 3.0
+let s = reduce(m, (+))
+// EXPECT: s = 60.0

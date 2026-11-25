@@ -1,4 +1,6 @@
-// TEST: Call Deferred Alias Read Side Effect Order
+// TEST: Call Deferred Alias Read Side Effect Order (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, a deferred alias READ inside an argument (`seen2(0)`), not passed
 // bare: the read forces the class at its own argument, after the bump, as the
@@ -16,7 +18,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
 }
 function h(k: Int64, s: Int64, q: Array<Int64 like Row>) -> Int64 = k + s + q(0)
 let r = h(bump(cnt), seen2(0), good |> compute)
-// EXPECT: r = 14
-// EXPECT: cnt = [1]
-// EXPECT: seen = [11]
-// EXPECT: seen2 = [11]
+// ERROR: BL4005 @ 19:11

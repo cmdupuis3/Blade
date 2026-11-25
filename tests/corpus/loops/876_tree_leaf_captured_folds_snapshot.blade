@@ -1,4 +1,6 @@
-// TEST: a fusion-tree leaf captured by another leaf folds its snapshot
+// TEST: a fusion-tree leaf captured by another leaf folds its snapshot (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G233, G214).
 // Gap G233, round 4 wave 10: the leaf q's kernel captures p, so the fold's
 // prelude forces p ONCE under its own name (G214) before the seed writes x.
 // The tree keeps the leaf NAME p and folds that snapshot (the stored-leaf
@@ -10,7 +12,4 @@ let p = method_for(x) <@> lambda(v) -> v * 2.0
 let q = method_for(x) <@> lambda(v) -> v + p(1)
 let s = reduce(p <&!> q, lambda(a, b) -> a + b, { x(0) = 10.0; Float64(0) })
 let w = p(0)
-// EXPECT: x = [10.0, 2.0]
-// EXPECT: p = [2.0, 4.0]
-// EXPECT: s = (6.0, 20.0)
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 12:1

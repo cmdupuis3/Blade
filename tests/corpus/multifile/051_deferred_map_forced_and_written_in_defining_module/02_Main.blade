@@ -1,8 +1,7 @@
-// TEST: A deferred map forced and its input written in the defining module
+// TEST: A deferred map forced and its input written in the defining module (rejects)
 // MODULE: Main
 module Main
 import H
 let w = H.e(1)
 let z = H.d(1)
-// EXPECT: w = 5.0
-// EXPECT: z = 4.0
+// ERROR-CONTAINS: an uncomputed value bound over it before the write

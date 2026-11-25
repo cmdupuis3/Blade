@@ -1,0 +1,9 @@
+// TEST: borrow a function defined after the write, folding a map bound before it (rejects)
+// g is bound before the write and used (folded inside f) after it.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+x(0) = 5.0
+function f() -> Float64 = reduce(g, (+))
+let s = f()
+// ERROR: BL4005 @ 5:1

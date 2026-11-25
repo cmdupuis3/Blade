@@ -1,0 +1,55 @@
+// TEST: A Stage Over The Guard Of One Map Composes Into The Kernel Before The Guard
+// Lane z (borrow round, 2026-11-24; gap G335, formalism 10.4): a `<$>` stage that moves a zero is refused
+// over an uncomputed guard (BL4022): `inc` maps 0.0 to 1.0, so its lines write it INSIDE the guard,
+// where it composes into the map's kernel (a11, a12: `dbl` over that guard, accepted); the laws' cells are
+// unchanged. `pos`, `toInt` and `dbl` keep the stage over the uncomputed guard of one map (a7-a12).
+// ============================================================================
+// Borrow round, lane x (functions/1265 b4). Left distribution (formalism 10.1
+// `f <$> c = c >>= pure . f`, 10.4 left zero): `f <$> guard(p, L <@> k)` is
+// `guard(p, L <@> (f . k))`. Where p is false a cell is the zero of the
+// STAGE's result type -- never f applied to a zero cell. The C++ lane guarded
+// the kernel first and then applied the stage, so `inc <$> guard(false, m)`
+// printed inc(0.0) = 1.0 per cell. Literal and run-time conditions, a negated
+// one, a deferred and an inline map body, a same-type, a Bool and an
+// element-type-changing stage, a two-stage stack, a guard of a guard over a
+// map, and a composed loop object. Pins by hand from the laws.
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let inc = lambda(z: Float64) -> z + 1.0
+let dbl = lambda(z: Float64) -> z * 2.0
+let pos = lambda(z: Float64) -> z > 0.0
+let toInt = lambda(z: Float64) -> Int64(floor(z))
+let m = method_for(cf) <@> lambda(v) -> v
+let flag = cf(0) > 9.0
+let flag2 = cf(0) > 1.0
+let a1 = guard(false, inc <$> m) |> compute
+let a2 = guard(true, inc <$> m) |> compute
+let a3 = guard(flag, inc <$> m) |> compute
+let a4 = guard(flag2, inc <$> m) |> compute
+let a5 = guard(!flag, inc <$> (method_for(cf) <@> lambda(v) -> v * 2.0)) |> compute
+let a6 = guard(false, inc <$> (method_for(cf) <@> lambda(v) -> v * 2.0)) |> compute
+let a7 = pos <$> guard(flag, m) |> compute
+let a8 = pos <$> guard(flag2, m) |> compute
+let a9 = toInt <$> guard(false, m) |> compute
+let a10 = toInt <$> guard(flag2, m) |> compute
+let a11 = dbl <$> guard(false, inc <$> m) |> compute
+let a12 = dbl <$> guard(flag2, inc <$> m) |> compute
+let a13 = guard(true, guard(flag, inc <$> m)) |> compute
+let a14 = guard(flag2, guard(false, inc <$> m)) |> compute
+let a15 = guard(true, guard(flag2, inc <$> m)) |> compute
+// EXPECT: a1 = [0.0, 0.0, 0.0]
+// EXPECT: a2 = [2.5, 1.0, -1.0]
+// EXPECT: a3 = [0.0, 0.0, 0.0]
+// EXPECT: a4 = [2.5, 1.0, -1.0]
+// EXPECT: a5 = [4.0, 1.0, -3.0]
+// EXPECT: a6 = [0.0, 0.0, 0.0]
+// EXPECT: a7 = [false, false, false]
+// EXPECT: a8 = [true, false, false]
+// EXPECT: a9 = [0, 0, 0]
+// EXPECT: a10 = [1, 0, -2]
+// EXPECT: a11 = [0.0, 0.0, 0.0]
+// EXPECT: a12 = [5.0, 2.0, -2.0]
+// EXPECT: a13 = [0.0, 0.0, 0.0]
+// EXPECT: a14 = [0.0, 0.0, 0.0]
+// EXPECT: a15 = [2.5, 1.0, -1.0]

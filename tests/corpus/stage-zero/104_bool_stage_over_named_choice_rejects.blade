@@ -1,0 +1,16 @@
+// TEST: A Bool Stage That Maps A Non-Zero Cell To False Over An Uncomputed Choice Is Refused (rejects)
+// ERROR: BL4022 @ 15:9
+// ERROR-CONTAINS: is not a stage that provably keeps zero cells zero and non-zero cells non-zero
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// The decision's witness: pos(-2.0) = false is a zero, so over the uncomputed choice the third cell
+// falls through to pos(3.0) = true ([true, true, true]) while over the computed choice it is
+// pos(-2.0) = false ([true, true, false]).
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let pos = lambda(z: Float64) -> z > 0.0
+let ch = cf <|> cf2
+let r = pos <$> ch |> compute

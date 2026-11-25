@@ -1,4 +1,6 @@
-// TEST: A whole-array rebind inside a block, then a dependent force
+// TEST: A whole-array rebind inside a block, then a dependent force (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G199).
 // Gap G199 (Codex diff review round 3): d is forced, x written and then
 // REBOUND inside one block statement, and p (over d and x) is forced later in
 // that statement: p reads the stored d and the rebound x. The LLVM lane used
@@ -15,4 +17,4 @@ let r = {
     let t = method_for(range<I>) <@> lambda(i) -> p(i) |> compute
     reduce(t, (+), 0.0) + z
 }
-// EXPECT: r = 38.0
+// ERROR: BL4005 @ 12:1

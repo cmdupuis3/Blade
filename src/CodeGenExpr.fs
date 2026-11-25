@@ -3258,7 +3258,8 @@ and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let rank = arrTy.IndexTypes.Length
         let extentsName = $"{varName}_extents"
         // Source loop variables, one per dimension.
-        let srcVar d = $"__t{varName}_{d}"
+        // (never a tuple binding's `__tup_<id>`: an output spelled `up`, lane x3)
+        let srcVar d = $"""__t{(prefixFamilyHole ((=) "up") varName)}_{d}"""
         // Destination extents = source extents with d1/d2 swapped.
         let swapDim d = if d = d1 then d2 elif d = d2 then d1 else d
         // Shared companion-extents rule (emitExtentsTable): the transposed

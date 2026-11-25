@@ -3,7 +3,7 @@
 GENERATED from the registry in `src/Knobs.fs` by `blade test knobs --write`; do not edit by hand.
 `blade test knobs` fails when this page and the registry disagree.
 
-Every environment variable the compiler, the programs it compiles and the test harness read, 113 in all, grouped by kind. `blade test` is what the suite does with the knob for its run (cleared, pinned to a value, or left alone); `toolchain` says whether `blade.toolchain.json` is read when the variable is unset (`file`) and whether bare `blade setup` persists it (`persisted`). A knob marked *no notes* has no row in the hand-written notes, `docs/reference/knob-notes.md`.
+Every environment variable the compiler, the programs it compiles and the test harness read, 114 in all, grouped by kind. `blade test` is what the suite does with the knob for its run (cleared, pinned to a value, or left alone); `toolchain` says whether `blade.toolchain.json` is read when the variable is unset (`file`) and whether bare `blade setup` persists it (`persisted`). A knob marked *no notes* has no row in the hand-written notes, `docs/reference/knob-notes.md`.
 
 ## Policies
 
@@ -150,5 +150,6 @@ Every environment variable the compiler, the programs it compiles and the test h
 |---|---|---|---|---|---|---|---|
 | `BLADE_INTERP_TIMEOUT_MS` | test harness | 300000 | `<ms>` a positive per-test ceiling; a malformed value is the default | harness | left alone | env only | The per-test ceiling of the interpreter differential, in milliseconds. |
 | `BLADE_INTERP_JOBS` | test harness | the processor count | `<n>` n >= 1 tests prepared ahead; `1` one test at a time (the A/B arm) | harness | left alone | env only | How many tests' compiled side the interpreter differential prepares ahead of the test it judges. |
+| `BLADE_INTERP_READING` | test harness | unset: the interpreter's own forcing schedule, unchanged | `binding` reading A: an uncomputed array binding is evaluated at its binding and kept; `use` reading B: it is evaluated afresh at each use from the current inputs, never kept across a write; `<other>` reads as unset | compiler | cleared | env only | Test instrument (borrow oracle): which evaluation reading the interpreter gives an uncomputed array binding; set alone, those bindings do not print. |
 | `BLADE_LLVM_GOLDEN_UPDATE` | test harness | off: the golden pins are asserted | `1` rewrite the LLVM golden pins instead of asserting them | harness | left alone | env only | Rewrites the LLVM lane's golden emission pins instead of asserting them. *No notes.* |
 | `BLADE_TEST_FSHARP_PARALLEL` | test harness | off: the F# pipeline runs under its lock | `1` / `on` run the F# pipeline unlocked (an experiment) | harness | left alone | env only | Runs the test harness's F# pipeline unlocked (an experiment; the default stays locked). *No notes.* |

@@ -1,0 +1,14 @@
+// TEST: A Stage That Maps The Zero To One Over An Inline Uncomputed Choice Is Refused (rejects)
+// ERROR: BL4022 @ 13:9
+// ERROR-CONTAINS: is not a stage that provably keeps zero cells zero and non-zero cells non-zero
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// inc(0.0) = 1.0 is non-zero, so the uncomputed choice keeps the left side's staged middle cell
+// ([2.5, 1.0, -1.0]) where the computed choice took the right side first ([2.5, 5.0, -1.0]).
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let inc = lambda(z: Float64) -> z + 1.0
+let r = inc <$> (cf <|> cf2) |> compute

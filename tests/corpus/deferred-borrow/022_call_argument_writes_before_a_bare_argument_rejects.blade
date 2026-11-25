@@ -1,0 +1,14 @@
+// TEST: borrow a call argument writes what a later bare argument reads (rejects)
+// Review row T19: h(bump(cnt), seen) -- the first argument writes cnt, which
+// the uncomputed seen reads, and seen is evaluated after it (left to right).
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, p: Array<Int64 like Row>) -> Int64 = k + p(0)
+let r = h(bump(cnt), seen)
+// ERROR: BL4005 @ 12:11

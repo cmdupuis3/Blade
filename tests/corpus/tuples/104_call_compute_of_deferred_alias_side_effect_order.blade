@@ -1,4 +1,6 @@
-// TEST: Call Compute Of Deferred Alias Side Effect Order
+// TEST: Call Compute Of Deferred Alias Side Effect Order (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, `seen2 |> compute` of an ALIAS as an argument after a writing one:
 // the compute is a COPY taken at its position (r = 14), and a copy forces
@@ -18,5 +20,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
 }
 function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
 let r = h(bump(cnt), seen2 |> compute, good |> compute)
-// EXPECT: r = 14
-// EXPECT: cnt = [1]
+// ERROR: BL4005 @ 21:11

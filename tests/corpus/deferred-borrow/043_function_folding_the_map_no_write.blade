@@ -1,0 +1,9 @@
+// TEST: borrow a function folding the map with no write is accepted
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+function f() -> Float64 = reduce(g, (+))
+let s0 = f()
+let s = f()
+// EXPECT: s0 = 12.0
+// EXPECT: s = 12.0

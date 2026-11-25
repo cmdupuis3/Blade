@@ -5,11 +5,14 @@
 // (s = 27.0) while the interpreter evaluated it after (s = 36.0). A fold over
 // a deferred map fuses and forces nothing (formalism 10.2): p and p1 do not
 // print, and the traversal reads the current m after the seed's write.
+// BORROW (2026-11-23): a seed writing m while the fold over p runs is refused (BL4005, formalism 10.2);
+// the block seed no longer writes, so the fused folds read the unwritten m (the old pins, s = 36.0,
+// s1 = 60.0 and m's written cell, read the write).
 let mut m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let p = method_for(m) <@> lambda(v) -> v + 1.0
-let s = reduce(p, lambda(a, b) -> a + b, { m(0, 0) = 10.0; Float64(0) }, axes = 2)
+let s = reduce(p, lambda(a, b) -> a + b, { let z: Float64 = 0.0; z }, axes = 2)
 let p1 = method_for(m) <@> lambda(v) -> v * 2.0
 let s1 = reduce(p1, (+), axes = 2)
-// EXPECT: m = [[10.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
-// EXPECT: s = 36.0
-// EXPECT: s1 = 60.0
+// EXPECT: m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+// EXPECT: s = 27.0
+// EXPECT: s1 = 42.0

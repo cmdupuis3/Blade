@@ -1,4 +1,6 @@
-// TEST: Fold Seed Writes Then Reads Spine
+// TEST: Fold Seed Writes Then Reads Spine (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G248, G214).
 // Gap G248 residual, round 4 wave 9 (B2): the seed WRITES x and then reads a
 // cell of the spine p. The spine is forced at the fold operand position,
 // before the seed runs (the G214 chosen rule), so both the seed read and the
@@ -7,5 +9,4 @@ let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
 let p = method_for(x) <@> lambda(v) -> v * 2.0
 let s = reduce(p, (+), { x(0) = 10.0; p(0) })
 let w = p(0)
-// EXPECT: s = 14.0
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 9:1

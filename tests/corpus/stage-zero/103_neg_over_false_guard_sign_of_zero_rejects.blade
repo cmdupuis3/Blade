@@ -1,0 +1,15 @@
+// TEST: A Negation Over An Uncomputed False Guard Is Refused For The Sign Of The Zero (rejects)
+// ERROR: BL4022 @ 14:9
+// ERROR-CONTAINS: the sign of the zero is observable
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// neg(+0.0) = -0.0: the uncomputed guard prints [0.0, 0.0, 0.0] (the zero of the result), the computed
+// one [-0.0, -0.0, -0.0]. Over a guard the stage must map the zero to EXACTLY the zero; `neg` inside
+// the guard is accepted (stage-zero/004).
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let neg = lambda(z: Float64) -> -z
+let r = neg <$> guard(false, cf) |> compute

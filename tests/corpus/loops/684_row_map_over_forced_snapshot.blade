@@ -1,4 +1,6 @@
-// TEST: Row Map Over A Forced Snapshot
+// TEST: Row Map Over A Forced Snapshot (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G199).
 // Gap G199 (Codex diff review round 2): p maps the ROWS of the deferred d;
 // d is forced (z = d(0, 0)) and x written, then p is read. Rebuilding p over
 // the stored d materializes its row operand, which used to re-enter the
@@ -13,5 +15,4 @@ let p = method_for(d) <@> sumrow
 let z = d(0, 0)
 x(0, 0) = 10.0
 let w = p(0)
-// EXPECT: z = 2.0
-// EXPECT: w = 12.0
+// ERROR: BL4005 @ 15:1

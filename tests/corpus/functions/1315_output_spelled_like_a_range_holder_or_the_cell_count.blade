@@ -1,0 +1,19 @@
+// TEST: An Output Spelled Like A Bare Range Holder Or The Flat Sweep's Cell Count
+// ============================================================================
+// Borrow round, lane x3 (item 1). A fold over a range with a run-time bound
+// holds the bounds in `__range<i>_r<id>` (the fold binding's IR id); an apply
+// whose operand is such a range holds them in `__range<i>_<output>`. An
+// output spelled `r<id>` -- here `r11`, the id of `s` in this tree's lowering
+// (`blade emit` shows `__range0_r11` for both before the fix) -- redeclared
+// the holder and its bound (BL9002). The apply's hole now takes `r11_`
+// (CodeGenState.rangeHolderName). An output spelled `cells` written by a flat
+// sweep met the sweep's `__fp_cells` the same way. Pins by hand.
+// ============================================================================
+let xs: Array<Float64 like Idx<3>> = [4.0, 2.0, 3.0]
+let n = Int64(floor(xs(0)))
+let s = reduce(method_for(0..n) <@> lambda(i) -> Float64(i), (+))
+let r11 = method_for(0..n) <@> lambda(i) -> Float64(i) * 2.0 |> compute
+let cells = xs * 2.0 |> compute
+// EXPECT: s = 6.0
+// EXPECT: r11 = [0.0, 2.0, 4.0, 6.0]
+// EXPECT: cells = [8.0, 4.0, 6.0]

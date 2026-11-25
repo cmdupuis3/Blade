@@ -2589,6 +2589,10 @@ pure   : α → Computation α
 (|> compute) : Computation α → α                                  // trigger evaluation
 ```
 
+A `<$>` stage over an UNCOMPUTED guard or choice is accepted only where the laws
+of 10.4 and the stage over the computed value give the same cells: §10.4, "A
+stage over an uncomputed guard or choice" (BL4022).
+
 ### 10.2 Parallel and product
 
 ```
@@ -2728,63 +2732,63 @@ packed). The PRINT rule: a class prints,
 under EVERY name in it, iff a forcing use at MODULE LEVEL (a top-level
 statement or block, or the capture of a top-level kernel) has forced any
 member by the end of the program; every name prints the same cells (no member
-can be written). The class value is fixed at its FIRST forcing event: a later
-write to one of the map's INPUTS does not change the stored cells any name of
-the class reads or prints (a fold over the map, which fuses, still reads the
-current inputs). A map that only function bodies force is evaluated inside
+can be written), and no input of it can be written while a use of it follows
+(the borrow, below), so every reading of it -- the cells a name prints, the
+cells a fold over it reads -- sees the same inputs. A map that only function bodies force is evaluated inside
 each call, privately, and never prints; a class nothing forces prints
 nothing. An alias bound inside a block or a function body (`let mut b = g`)
 is a local assignable COPY instead -- binding it is a forcing use of `g` --
-and is ordinary storage. In the LLVM lane (round 3, wave 4b) the force
-points follow the C++ lane's statement pre-pass: a top-level BLOCK forces,
-before any of its effects, every deferred map the pre-pass would (the bases
-of its positional reads, call arguments, prodsum operands and folds over a
-deferred choice, in first-read order; a chain ending in a tuple, its lets'
-reads only); any other forcing use in main stores the map at the start of
-its top-level statement; in a function body, at the start of the body
-statement that first forces it. A map read exactly ONCE is stored there
-too (a force nested in another such force at the start of that one), so its
-print reads the first-forcing cells and an unread failing cell fails there
-(`loops/576`, `579`, `580`); a fold that is a map's only reader keeps it fused
-only when the program has no assignment at all and the fold's kernel and
-seed cannot fail and read no unforced deferred map (`586`-`588`); an alias
-bound in a block is copied at its binding, its source forced AT the alias,
-after the block's earlier effects (`577`, `584`, `585`) -- unless the block's
-pre-pass already forced the source, when the alias only copies; a tuple's
-members take their own force points only for a top-level statement's root
-tuple or the tuple its let chain ends in (admitted as the C++ lane admits
-member order), never a tuple bound by an inner `let` of a block;
-`let v = g |> compute` no longer makes g print once v is forced (the compute
-is a copy; `581`); and a function body evaluates a deferred module map
-privately, as a whole, from the current inputs (`547`, `578`, `582`, `583`).
-LANE EXCEPTIONS (OPEN under G60 / G75): where that lane cannot place such a
-store -- a sole read inside an open `let rec` trip scope at module level, or
-in a statement whose slots an earlier in-place force already upgraded -- the
-read is consumed in place and the print still REDOES the producer over the
-current inputs; a block alias of a module map OFF that straight-line spine
-(a block inside a branch or a loop body), and a private map a function
-forces inside one of its loop scopes, are refused by that lane (the program
-runs in the C++ lane); tested on the witnesses above, not proved absent
-elsewhere. OPEN (G60 / G77, inherited): the interpreter forces at the read
-instead -- `let r = { x(0) = 5; g(0) + g(1) }` is r = 15 in the LLVM lane
-(the pre-pass's force) and r = 7 in the interpreter, and an earlier failing
-statement in the block wins in the interpreter only; likewise with an alias of the map, a prodsum over
-it, an inner tuple `let` reading it, or reads of a second map beside an
-alias of the first. What
-changed in round 3, wave 4: the C++ lane forced
-`g` AT an assignable alias, so `g` printed and `g2` never did and `g`'s
-failure fired at the alias; the interpreter forced and printed only the name
-read, and memoized and printed a module map a FUNCTION body forced; the LLVM
-lane forced through an alias where the fold should fuse; and writes through a
-deferred map gave three answers (the LLVM lane folded the unwritten map, a
-silent wrong value; a reassignment dropped the old producer's failure there).
-Pinned by `loops/540`-`561` and `576`-`588`. The LLVM lane runs `loops/545`,
-`547`, `578`, `582` and `583` (the G75 print rule and the function-body
-copy). LANE REFUSALS (not LLVM semantics; the program runs in the C++ lane):
-`loops/544` (its function returns a dynamic-extent `group_by` result), a call
-from main after main forced the map (its class value is then the stored
-snapshot, which the private evaluation would not read), a deferred module
-value that is not a map form, and the two off-spine shapes above.
+and is ordinary storage; it is forced AT its binding, after the block's
+earlier statements, in every lane (`577`, `585`). A map read exactly once
+is evaluated whole at that read, so an unread failing cell fails there
+(`loops/580`), and `let v = g |> compute` is a copy that does not make `g`
+print (`581`). OPEN (G60 / G77, failure order, R6): the compiled lanes force
+a top-level block's other deferred reads before its statements, the
+interpreter at each read, so an earlier failing statement in the block wins
+in the interpreter only. (A print after a write past a printing map's last
+use -- where the LLVM lane redid the producer over the written input -- can no
+longer happen: printing is a use, below.) Each lane's force points, its
+fold-fusion certificate and its lane refusals are mechanics, recorded in
+gap rows G60 and G75. Pinned by `loops/540`-`561` and `576`-`588`.
+
+**The borrow.** Binding an UNCOMPUTED array value -- a map, a co-iteration,
+a guard or choice, a bound application `L <@> x`, a tuple all of whose members are uncomputed, a top-level alias
+of one (its alias class), or an uncomputed value built over another (it borrows what that one borrows) --
+BORROWS every storage it reads: its operands, its kernels' captures (a callee's module reads included), the
+names it reads by name (a scalar too: a whole rebinding changes what a by-name reading reads). From the binding
+to the value's LAST USE that storage is read-only: a WRITE to it -- an element write or compound cell assignment,
+a write through any view, alias, tuple or struct carrier of it, a call whose callee chain writes it (a captured
+`let mut`, a `mut` parameter bound to it), handing it to a callback or an unresolved callee, or a whole
+reassignment `x = e` -- while some use of the value MAY still execute is REFUSED (BL4005, at the write, at
+lowering, so in every lane). A use is any member of the alias class or any uncomputed value derived from it,
+named or reached through a function or kernel that reads it; uses are ordered by evaluation order (statements,
+then the order inside a statement given in this section), and where that order cannot be decided the rule fails
+closed: either arm of a branch counts, a loop body follows itself, a function that reads the value is a use at
+every call that may follow the write and one that writes is a write at every call. Inside ONE traversal, a
+kernel, seed or join leg that writes storage the traversal's own uncomputed operand (or an uncomputed map it
+captures) reads is a write under a used borrow; a traversal directly over STORED cells its kernel writes is
+in-place code and no borrow. NOT borrowers: a function, a lambda, an unapplied loop object (callables read
+their captures when called), a computed array, a stored view; and a named map whose kernel writes is evaluated
+once at its definition (above), a computed value. An extent or rank read that evaluates nothing (a static
+extent, a cell-for-cell map's run-time extent read from its stored operand) is no use. PRINTING IS A USE (the
+owner, 2026-11-23): a top-level uncomputed value that prints (the PRINT rule above: its class has a forcing use
+at module level; a fused fold and a `|> compute` copy are none, but materializing a value -- a forcing use or a copy -- forces the named uncomputed values its producer reads, to any depth, and those print) is used at the END of the program, so no write
+to what it reads may follow its binding at all; one that never prints (only folded, or used only inside
+function bodies) is unaffected. The two remedies: RE-APPLY the loop object
+after the write (`let f = object_for(k)`, then `f <@> x` at each use: no extra memory, it reads the current
+cells), or SNAPSHOT before it (`let c = g |> compute`: a full copy, fresh storage that borrows nothing). The
+property it buys: in every accepted program an uncomputed value reads the same cells whether it is evaluated at
+its binding, at each use, or once at its first use, so no accepted program's values depend on where a lane
+places the evaluation (`deferred-borrow/001`-`057`).
+
+```blade rejects
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+x(0) = 5.0      // refused: g is used again below
+let b = g(0)
+// ERROR: BL4005
+```
 
 **Deferred members of a tuple value (gaps G58, G59, G61, G62).** A tuple ALL
 of whose members are deferred computations is itself a deferred tuple: binding
@@ -2860,7 +2864,7 @@ binding, after the block's statements); a binding's tuple value that the C++
 lane evaluates MEMBER BY MEMBER (two or more leaves that may fail, or a
 compute / deferred member -- the emitter's own judgment) is one region per
 leaf, left to right.
-A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. Its contract is the interpreter's (gap G239): inside a callable body each ordinary forcing use evaluates the map at its own position in evaluation order and an untaken one evaluates nothing, a kernel capture is one snapshot at its traversal's prelude -- and there the evaluation COUNT is observable too, when the body writes an INPUT of the map between two forcing uses (a module array written by name, or by a callee, inside a loop step). Since round 4 wave 10 the compiled lanes follow it for a FUNCTION body's scalar positional reads (`functions/1030`-`1039`, `1048`): a body statement whose order the statement prefix cannot reproduce has each read replaced by a call of a one-statement helper that forces the map privately, and its spine put in evaluation order (Lowering.splitDeferredBodyReadsModule) -- a read in an untaken arm, a short-circuited operand, a loop step or after an operation that may fail is forced where the interpreter forces it; a statement the rewrite cannot prove equivalent (a read with an index that may fail, a non-scalar read or whole-array use, a fold or array event before a later read, a deferred capture of a callable the statement names) keeps the statement prefix and stays OPEN under G239. The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
+A binder already DEFINITELY forced may be read by a later arm: by an EARLIER top-level statement, an earlier let of the same block, an earlier leaf of a member-ordered tuple, or the enclosing `if`'s condition / `match`'s scrutinee / loop bounds (they run before the arms in every lane) -- definitely meaning on every successful evaluation path: a read of it, a whole-array call argument or a prodsum operand (eager), in an unconditional position (the left operand of `&&` / `||`; an inner `if` / `match` counts what EVERY branch forces, the intersection of its successful branches), never a copy, a fused fold or map over it, one arm for another, or one iteration for the next; at module level that force stores and memoizes it. This audit covers TOP-LEVEL code only (module statements and their blocks): inside a FUNCTION, lambda or kernel body, and inside a LOOP body (a let-rec step, a `while` guard), only the structural audit above applies -- a sound entry state there would need every invocation and consumption site (captures, recursion, deferred kernels), so the C++ pre-pass vs interpreter divergence inside callable bodies (pre-existing) stays OPEN under G77, recorded, not refused. Its contract is the interpreter's (gap G239): inside a callable body each ordinary forcing use evaluates the map at its own position in evaluation order and an untaken one evaluates nothing, a kernel capture is one snapshot at its traversal's prelude (its evaluation COUNT is unobservable: a write to an input of the map between two forcing uses is refused, the borrow above). Since round 4 wave 10 the compiled lanes follow it for a FUNCTION body's scalar positional reads (`functions/1030`-`1033`, `1037`-`1039`, `1048`): a body statement whose order the statement prefix cannot reproduce has each read replaced by a call of a one-statement helper that forces the map privately, and its spine put in evaluation order (Lowering.splitDeferredBodyReadsModule) -- a read in an untaken arm, a short-circuited operand, a loop step or after an operation that may fail is forced where the interpreter forces it; a statement the rewrite cannot prove equivalent (a read with an index that may fail, a non-scalar read or whole-array use, a fold or array event before a later read, a deferred capture of a callable the statement names) keeps the statement prefix and stays OPEN under G239. The forcing read must be a read OF THE BINDER (`g(0)`): a copy (`g |>
 compute`) evaluates g's computation without forcing it or making it print,
 and counts as an operation that may fail. Force anything else before the `if`
 (`let v = g |> compute`, or a statement that reads it) and read the value in
@@ -2869,13 +2873,7 @@ nothing and is admitted (`loops/562`-`568`, `575`, `functions/852`-`853`, `857`,
 under G77). The first-failure consequence is
 deliberate: a failing member fails at the construction even when the program
 never projects it -- `let held = (g, 1.0)` with `g` dividing by zero fails at
-`held`, before a later failing statement (`tuples/041`). What changed in round
-3, wave 4: the C++ lane refused a bare member (`unevaluated computation used as
-value`), named undeclared members of a deferred tuple member or of an
-`if`-held tuple, and let g++ evaluate `std::make_tuple`'s arguments right to
-left; the interpreter held a bare member deferred inside the tuple and
-evaluated it at a later projection; the LLVM lane kept it a producer and ran
-it only where the tuple was read, and refused an `if`-held tuple. Pinned by
+`held`, before a later failing statement (`tuples/041`). Pinned by
 `tuples/041`, `044`-`079`.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
   method_for(A, B)`; identity `method_for()`; commutative up to index
@@ -2967,6 +2965,73 @@ and the rewrite must not assume it.
 
 Zero-function laws: `(M <@> zero) >>= k ≡ M <@> zero`; `zero` absorbs `>>@`
 composition both sides; `shape(M <@> zero) = S-dims(M)`; `σ(M <@> zero) = σ(M)`.
+
+**A stage over an uncomputed guard or choice** (gap G335; the owner's decision
+of 2026-11-24). The laws hold as stated, and over an UNCOMPUTED guard or choice
+they give `f <$> c` its value: where `guard(p, c)`'s condition is false the cell
+is the zero of f's RESULT (left zero), and over `a <|> b` the stage runs on each
+side and "first non-zero" is tested on the STAGED cells (left distribution).
+Over the computed value, `f <$> (c |> compute)`, the stage maps the cells. The
+two differ whenever f moves a zero -- `inc <$> guard(false, c)` would be zeros
+where `inc <$> (guard(false, c) |> compute)` is ones -- and that would be the one
+place where `|> compute` changes a value with no write involved. So such a
+program is accepted only where the two readings provably agree, decided at
+compile time before the lane split (BL4022, at the stage application; nothing
+is checked at run time):
+
+- over a GUARD, f must map the exact zero of its input element type to the
+  exact zero of its result type (`0.0` -- not `-0.0` --, the complex zero with
+  both parts `+0.0`, `0`, `false`), which the compiler evaluates: f is a pure
+  scalar function whose captures are compile-time constants. A run-time
+  capture, a failure at the zero (`10 / z`) or a form the evaluation does not
+  know is refused. `-z` maps `0.0` to `-0.0`, which prints differently: refused;
+- over a CHOICE, f must keep zero cells zero and non-zero cells non-zero, which
+  no single point shows. The stages that cannot change which cells are zero
+  are exactly: the parameter itself; a Float or complex product by a finite
+  literal c with |c| ≥ 1 (either side); a Float or complex quotient by a
+  literal with 0 < |c| ≤ 1; an integer product by an ODD literal (a bijection
+  modulo 2ⁿ, so wrapping never reaches 0); an integer quotient by `1` or `-1`;
+  unary minus; `conj`; the casts Int32 → Int64, an integer → a float or complex
+  type, Float32 → Float64 or complex, Float64 → Complex128, Complex64 →
+  Complex128, Bool → a number (`false` → 0, `true` → 1), and a same-type cast;
+  and compositions of these (a named function, a let-bound lambda, `f >> g`, a
+  stack of stages). Every other stage is refused: `z * 0.5` and `z / 2.0` can
+  underflow to zero, an integer `z / 2` truncates and `z * 2` wraps to zero,
+  `z > 0.0` maps `-2.0` to `false`, `z + 1.0` maps `0.0` to `1.0`;
+- a NEST -- a guard of a choice, a choice of guards, a guard of a guard -- takes
+  every requirement of what it contains.
+
+The operand is followed through names, top-level and block-local aliases,
+tuple members, `if` / `match` arms, a bind's continuation and a stack of stages.
+A stage over a map application composes into its kernel, a stage over a
+computed value maps its cells, and a stage written inside a guard or a choice
+is a stage over its body: none of them is restricted. A `<$>` over an
+uncomputed `<|:>` fallback is not supported in any lane, and `f <$>` a
+`sequence` maps the stacked cells. Both intents keep an exact spelling: the
+laws' cells by writing the stage INSIDE, `guard(p, f <$> c)` and
+`(f <$> a) <|> (f <$> b)`; the cells' reading by staging the computed value,
+`f <$> (c |> compute)`.
+
+```blade rejects
+let cf: Array<Float64 like Idx<3>> = [1.5, 0.0, -2.0]
+let inc = lambda(z: Float64) -> z + 1.0
+let r = inc <$> guard(false, cf) |> compute
+// ERROR: BL4022
+// ERROR-CONTAINS: maps the zero 0.0 to 1.0
+```
+
+```blade
+let cf: Array<Float64 like Idx<3>> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like Idx<3>> = [9.0, 4.0, 3.0]
+let inc = lambda(z: Float64) -> z + 1.0
+let dbl = lambda(z: Float64) -> z * 2.0
+let laws = (inc <$> cf) <|> (inc <$> cf2) |> compute
+let mapped = inc <$> (cf <|> cf2 |> compute) |> compute
+let both = dbl <$> (cf <|> cf2) |> compute
+// EXPECT: laws = [2.5, 1.0, -1.0]
+// EXPECT: mapped = [2.5, 5.0, -1.0]
+// EXPECT: both = [3.0, 8.0, -4.0]
+```
 
 ### 10.5 Other laws
 

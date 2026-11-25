@@ -1,0 +1,8 @@
+// TEST: borrow an imported module's storage written while its map is still used (rejects)
+// MODULE: Main
+module Main
+import H
+let a = H.d(0)
+H.x(0) = 10.0
+let z = H.d(1)
+// ERROR-CONTAINS: is still used after it

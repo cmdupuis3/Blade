@@ -1,4 +1,4 @@
-// TEST: An imported deferred map forced by the copy of a tuple member
+// TEST: An imported deferred map forced by the copy of a tuple member (rejects)
 // MODULE: Main
 module Main
 import H
@@ -6,4 +6,4 @@ let p = method_for(H.d) <@> lambda(v) -> v + 1.0
 let t = (p, 0.0)
 H.x(0) = 10.0
 let z = H.d(0)
-// EXPECT: z = 2.0
+// ERROR-CONTAINS: an uncomputed value bound over it before the write

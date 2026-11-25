@@ -1,0 +1,11 @@
+// TEST: borrow the loop object re-applied after the write
+// The recipe spelling: a loop object is no borrower (it reads its operands
+// when it is applied), so re-applying it after the write reads the current
+// cells, with no copy.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let f = object_for(lambda(v: Float64) -> v * 2.0)
+let s1 = reduce(f <@> x, (+))
+x(0) = 5.0
+let s2 = reduce(f <@> x, (+))
+// EXPECT: s1 = 12.0
+// EXPECT: s2 = 20.0

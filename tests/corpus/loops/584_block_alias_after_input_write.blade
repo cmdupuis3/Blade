@@ -1,4 +1,6 @@
-// TEST: Block Alias After Input Write
+// TEST: Block Alias After Input Write (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G60).
 // ----------------------------------------------------------------------------
 // Gap G60 (c), the write BEFORE the alias (577 is the write after it): the
 // alias `b` forces g AT its own binding, so it reads the written input:
@@ -14,6 +16,4 @@ let r = {
     let b = g
     b(0) + b(1)
 }
-// EXPECT: x = [5, 2]
-// EXPECT: g = [2, 5]
-// EXPECT: r = 7
+// ERROR: BL4005 @ 13:1

@@ -971,8 +971,11 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
     // is the existing pre-pass order (the force runs before the statement,
     // not at the read inside it): the C++ / interpreter divergence inside
     // callable bodies stays OPEN under G60 / G77 (formalism 10.2).
-    let moduleDeferredReadsOf (value: IRExpr) : IRId list =
-        if Map.isEmpty currentDeferred then [] else
+    // G279: the body closures whose captures were forced at their formation
+    // (closureFormationForces below); filled as the lets are emitted
+    let formedClosures = System.Collections.Generic.HashSet<IRId>()
+    let moduleDeferredReadParts (value: IRExpr) : IRId list * IRId list * IRId list * IRId list =
+        if Map.isEmpty currentDeferred then ([], [], [], []) else
         let probe = { ctx with VarNames = currentNames; DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
         let positional = collectDeferredPositionalReads probe value
         let captured = System.Collections.Generic.List<IRId>()
@@ -984,6 +987,15 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         // (Codex design review round 2: `let unused = object_for(lambda ..)`
         // must not force the deferred map its kernel captures)
         let note (k: IRExpr) =
+            match k with
+            // a body closure whose captures were forced at its FORMATION (G279,
+            // closureFormationForces): its closure object -- and a direct
+            // call's forward, which names the formation holder, declared at
+            // the body's scope under the binder's own name (the body's first
+            // force of it) -- read that holder; a re-force here would be a
+            // dead second evaluation with no reader
+            | IRVar (h, _) when formedClosures.Contains h -> ()
+            | _ ->
             match resolveKernel k with
             | Some rk when seenCallables.Add rk.Callable.Id ->
                 for cap in rk.Callable.Captures do
@@ -1069,9 +1081,74 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
              | IRVar _ -> ()
              | _ -> scan value)
             List.ofSeq acc
-        (List.ofSeq operands @ positional @ List.ofSeq captured @ structural) |> List.distinct
-    let emitBodyLet (id: IRId, value: IRExpr) : string list =
-        let ids = moduleDeferredReadsOf value
+        (List.ofSeq operands, positional, List.ofSeq captured, structural)
+    // G279 (borrow round): the captures of a body closure the C++ lane would
+    // forward undeclared -- a module deferred map main has not stored before
+    // this function and no earlier statement of this body has forced (no
+    // holder of this body carries its name, bodyForceNamesCell) -- forwarded
+    // as the G279 refusal sentinel (BL7004; functions/1178) or an undeclared
+    // name -- that CANNOT FAIL (CodeGenBinding.deferredBinderIsTotal). Only
+    // such a capture is forced (closureFormationForces below), so every
+    // program that compiled keeps its emission; a map that may fail stays
+    // refused.
+    let unstoredTotalCaptures (cl: IRCallable) : IRId list =
+        cl.Captures
+        |> List.filter (fun c ->
+            Map.containsKey c.Id currentDeferred
+            && not (match (bodyForceNamesCell ()).Value with
+                    | top :: _ -> top.Contains (captureForwardName currentNames c)
+                    | [] -> false)
+            && deferredBinderIsTotal { ctx with VarNames = currentNames; DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf } c.Id)
+        |> List.map _.Id
+    let moduleDeferredReadsOf (value: IRExpr) : IRId list =
+        let (operands, positional, captured, structural) = moduleDeferredReadParts value
+        (operands @ positional @ captured @ structural) |> List.distinct
+    let stmtProbeCtx () =
+        { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
+                   DeferredComputations = currentDeferred; DeferredAliasOf = currentAliasOf }
+    // T18 (borrow round): the named explicit computes (`m |> compute` over a
+    // module deferred map) a statement holds in by-name slots that its own
+    // pre-pass does not force -- each rendered as an undeclared `m` (BL9002).
+    let namedComputeSlotsOfStmt (value: IRExpr) : IRId list =
+        if Map.isEmpty currentDeferred then [] else
+        let probe = stmtProbeCtx ()
+        namedComputeSlotsIn probe (forcedAliasClosure probe (moduleDeferredReadsOf value)) value
+    // G279: the FORMATION of such a closure (`let h = lambda(i) -> d(i)`)
+    // renders a closure object that copies its captures too, so the same
+    // force applies at the forming let -- only when the closure never leaves
+    // this body's direct calls (callableLetEscapes: the holder is freed at
+    // the body's exit, and a returned or stored closure value would outlive
+    // it).
+    let callableLetEscapes (hid: IRId) : bool =
+        let mutable esc = false
+        let rec visit (e: IRExpr) : bool =
+            if esc then false else
+            match e with
+            | IRApp (IRVar (f, _), args, _) when f = hid ->
+                // the head is the call itself: only the arguments are walked
+                for a in args do visitTopDown visit a
+                false
+            | IRVar (v, _) when v = hid -> esc <- true; false
+            | _ ->
+                (match resolveCallable e with
+                 | Some cl when cl.Captures |> List.exists (fun c -> c.Id = hid) -> esc <- true
+                 | _ -> ())
+                not esc
+        for (_, v) in lets do visitTopDown visit v
+        visitTopDown visit retExpr
+        esc
+    let closureFormationForces (id: IRId) (value: IRExpr) : IRId list =
+        match value with
+        | IRVar _ when not (Map.isEmpty currentDeferred) ->
+            (match resolveCallable value |> Option.map unstoredTotalCaptures with
+             | Some (_ :: _ as ids) when not (callableLetEscapes id) -> ids
+             | _ -> [])
+        | _ -> []
+    let rec emitBodyLet (id: IRId, value: IRExpr) : string list =
+        if not (List.isEmpty (namedComputeSlotsOfStmt value)) then emitBodyComputeLet (id, value) else
+        let formed = closureFormationForces id value
+        if not formed.IsEmpty then formedClosures.Add id |> ignore
+        let ids = (moduleDeferredReadsOf value @ formed) |> List.distinct
         if List.isEmpty ids then emitBodyLetCore ctx currentDeferred (id, value) else
         setAllocOwner (Some id)
         let forceCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren
@@ -1095,6 +1172,63 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             | Some n -> currentNames <- Map.add i n currentNames
             | None -> currentNames <- Map.remove i currentNames
         preCode @ lines
+    // T18 (borrow round): a body statement holding named explicit computes
+    // (namedComputeSlotsOfStmt) -- `run() = h(bump(o), seen, good |> compute)`,
+    // `h1(good |> compute) + 1`, a block's tail -- each rendered as an
+    // undeclared module map (BL9002). Only a SCALAR statement is admitted (a
+    // temporary an array result may alias would need the escape analysis
+    // to see it). Two routes, the module level's own:
+    //  - a ROOT call with such an argument takes genOrderedCallBinding
+    //    (genScalarExprBinding's dispatch), every argument evaluated left to
+    //    right at its own position: the compute into a temporary copy, a bare
+    //    deferred argument and an argument's positional read forced there --
+    //    so those are NOT forced at the statement's start (the pre-pass keeps
+    //    only the captures, operands and structural sources it forces for any
+    //    statement);
+    //  - otherwise each compute is evaluated before the statement when its map
+    //    cannot fail (CodeGenBinding.hoistNamedComputeSlots; refused, BL7004,
+    //    when it may), and the statement renders as any other.
+    and emitBodyComputeLet (id: IRId, value: IRExpr) : string list =
+        setAllocOwner (Some id)
+        let varName = localVarName id
+        let probe = stmtProbeCtx ()
+        let (operands, positional, captured, structural) = moduleDeferredReadParts value
+        let ids = (operands @ positional @ captured @ structural) |> List.distinct
+        let excluded = forcedAliasClosure probe ids
+        match scalarElemOf (inferExprType value), value with
+        | None, _ ->
+            currentNames <- Map.add id varName currentNames
+            codegenError probe indent
+                "an `m |> compute` of a module map inside an array-valued (or unit-valued) statement of a function body is not built (review row T18): bind `let c = m |> compute` in a statement of its own first and read `c`"
+        | Some _, IRApp (f, args, _) when args |> List.exists (fun a -> (namedComputeSlotOf probe excluded a).IsSome) ->
+            let inF = Set.ofList (collectDeferredPositionalReads probe f)
+            let argReads = positional |> List.filter (fun i -> not (inF.Contains i)) |> Set.ofList
+            let keep = Set.ofList (operands @ captured @ structural)
+            let preIds = ids |> List.filter (fun i -> keep.Contains i || not (argReads.Contains i))
+            let (preCode, ctxF) = forceDeferredBindingIds probe builder $"__v{id}__def" preIds
+            let tempBinding = { Id = id; Name = varName; Type = inferExprType value; Value = value; IsConst = false; IsMutable = true }
+            let (code, _) = genBinding ctxF tempBinding builder
+            currentNames <- Map.add id varName currentNames
+            preCode @ code
+        | Some _, _ ->
+            match hoistNamedComputeSlots probe builder varName excluded value with
+            | Error why ->
+                currentNames <- Map.add id varName currentNames
+                codegenError probe indent why
+            | Ok None -> emitBodyLetCore ctx currentDeferred (id, value)
+            | Ok (Some (hoistCode, ctxH, value')) ->
+                // the temporaries' names (fresh ids) join this body's scope
+                for KeyValue (i, n) in ctxH.VarNames do
+                    if not (Map.containsKey i currentNames) && not (Map.containsKey i currentDeferred) then
+                        currentNames <- Map.add i n currentNames
+                hoistCode @ emitBodyLet (id, value')
+    // T18: a RETURN holding named explicit computes is bound to a body let
+    // first (the routes above), and the body returns that let.
+    let (lets, retExpr) =
+        if List.isEmpty (namedComputeSlotsOfStmt retExpr) then (lets, retExpr)
+        else
+            let rid = builder.FreshId()
+            (lets @ [ (rid, retExpr) ], IRVar (rid, inferExprType retExpr))
     let stmts = lets |> List.collect (fun (id, value) ->
         siblingArmBegin id (localVarName id) siblingPreflight
         let lines = emitBodyLet (id, value)

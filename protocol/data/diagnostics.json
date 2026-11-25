@@ -847,6 +847,19 @@
         "docs/plans/plan-graphs-trees.md"
       ]
     },
+    "BL4022": {
+      "title": "stage would change a zero of an uncomputed guard or choice",
+      "explanation": "A stage applied with `<$>` to an UNCOMPUTED guard or choice has two readings. Over the uncomputed form it follows the laws (formalism 10.4): where a guard is false the cell is the zero of the stage's RESULT, and over a choice the stage runs on each side and \"first non-zero\" is tested on the staged cells. Over the computed value (`|> compute` first) the stage maps the cells. The two differ whenever the stage does not keep zero as zero: `inc <$> guard(false, c)` would be zeros but `inc <$> (guard(false, c) |> compute)` ones, and `(lambda(z) -> z > 0.0) <$> (a <|> b)` tests the stage's Bools where the computed choice tests the numbers. So a stage over a guard must provably map the exact zero of its input to the exact zero of its result (evaluated at compile time; `-z` maps 0.0 to -0.0, a different printed value), and a stage over a choice must be one of the stages that cannot change which cells are zero (a product by a literal of magnitude at least one, a quotient by a literal of magnitude at most one, an odd integer product, negation, `conj`, a widening cast, and their compositions). A nest of guards and choices takes both requirements; what cannot be decided is refused.",
+      "fix": "Say which reading you mean. The laws' reading: put the stage INSIDE -- `guard(p, f <$> c)`, `(f <$> a) <|> (f <$> b)`. The cells' reading: stage the computed value -- `f <$> (g |> compute)`.",
+      "examples": [
+        "tests/corpus/stage-zero/101_inc_over_named_false_guard_rejects.blade",
+        "tests/corpus/stage-zero/104_bool_stage_over_named_choice_rejects.blade",
+        "tests/corpus/stage-zero/103_neg_over_false_guard_sign_of_zero_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
     "BL5000": {
       "title": "ml elaboration error",
       "explanation": "The `ml` domain elaborator refused a construct: a non-static configuration where a compile-time spec is required, a gated block reached in the wrong order, a bad derivation order, or an op whose arguments do not fit its spec.",

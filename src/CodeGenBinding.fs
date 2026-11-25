@@ -685,7 +685,43 @@ let extentAgreementGuard (ind: string) (what: string) (lhsLabel: string) (lhs: s
       $"{ind}    std::cerr << \"Blade runtime: {what} needs equal extents, but {lhsLabel} has \" << ({lhs}) << \" and {rhsLabel} has \" << ({rhs}) << \" -- the walk is bounded by one of them, so the shorter one would be read past its end\" << std::endl;"
       $"{ind}    blade_rt::panic(\"BL8011\", \"co-iteration extent mismatch\", {(declPanicArgs ())});"
       $"{ind}}}" ]
+
+/// THE ARRAY TYPE OF A STAGED VALUE (lane x3). `f <$> c` over an array-valued
+/// computation c (a stored or computed array, a map, a choice, a guard, another
+/// stage, under any `|> compute`) is an array of c's shape whose cells are what
+/// the outermost stage returns (formalism 10.4). IR.typeOf answers the STAGE's
+/// return type for it, a scalar, and a binding the lowering lifts out of an
+/// expression (`method_for(toC <$> (a <|> b) |> compute) <@> k` binds the
+/// operand first) carries that scalar type: the choice was emitted as two
+/// scalar folds and the loop read `.data` of a scalar (BL9002). A binding the
+/// type checker typed keeps its type; a scalar-typed one whose value is such a
+/// stage takes the array type. None when the value is no stage over an array.
+let private stagedArrayType (ctx: CodeGenContext) (value: IRExpr) : IRType option =
+    let rec arrayOf (e: IRExpr) : IRType option =
+        match e with
+        | IRCompute x -> arrayOf x
+        | IRFunctorMap (f, c) ->
+            let cellTy =
+                match expandStage ctx f |> List.tryLast |> Option.bind functorWrapperRetType with
+                | Some t -> Some t
+                | None -> (match inferExprType f with FuncElem (_, r) -> Some r | _ -> None)
+            match arrayOf c, cellTy with
+            | Some (ArrayElem arr), Some t when (match stripUnits t with IRTScalar _ -> true | _ -> false) ->
+                Some (mkArrayLike { arr with ElemType = t })
+            | Some (ArrayElem _ as at), _ -> Some at
+            | _ -> None
+        | IRChoice (l, _) -> arrayOf l
+        | IRGuard (_, b) -> arrayOf b
+        | _ -> (match stripUnits (inferExprType e) with ArrayElem _ as t -> Some t | _ -> None)
+    match value with
+    | IRCompute (IRFunctorMap _) | IRFunctorMap _ -> arrayOf value
+    | _ -> None
+
 let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
+    let binding =
+        match stripUnits binding.Type, stagedArrayType ctx binding.Value with
+        | ArrayElem _, _ | _, None -> binding
+        | _, Some t -> { binding with Type = t }
     let (code, ctx') = genBindingDispatch ctx binding builder
     // Gap G42: a binding whose own C++ name gained TupleChildren holds a FLAT
     // tuple (every emitter that registers children for its own name builds
@@ -962,6 +998,25 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     | IRCompute eager when
         isStatementShaped eager && not (isDeferringForm eager) && not (isGroupTableForm eager) ->
         genBinding ctx { binding with Value = eager } builder
+    // `t |> compute` of a NAMED wholly-deferred tuple (directly, through
+    // aliases), and the force of one a kernel captures: a tuple is a VALUE
+    // (formalism 10.2), so it is the tuple of its members, each evaluated at
+    // construction, left to right, as a copy (genMemberOrderedTupleBinding);
+    // the members' own bindings are not forced. It rendered
+    // `std::make_tuple(g1, g2)` over names nothing declared (BL9002).
+    // A force of the tuple UNDER ITS OWN NAME (forceDeferredArrayInput: a
+    // kernel or closure capturing it, a whole by-name use) is not that: the
+    // reader is a callable body reading `t[k]`, whose member reads would
+    // force the members themselves (formalism 10.2), not a tuple value --
+    // not built in the C++ lane, a coded refusal instead of the undeclared
+    // names (gap rows G58 / G326).
+    | IRCompute (IRVar (tid, _) as inner) when (deferredTupleMembers ctx inner).IsSome ->
+        if binding.Id = tid then
+            (codegenError ctx ind
+                $"the deferred tuple `{name}` (a tuple of maps with no `|> compute`) is read whole by name here -- a kernel or closure capturing it, or a use of the tuple as one value -- which the C++ lane does not build (gap G326): bind the member it reads to a `let` first (`let m = {name}[k]`) and read `m`",
+             addVarName binding.Id name ctx)
+        else
+        genBinding ctx { binding with Value = IRTuple ((deferredTupleMembers ctx inner).Value |> List.map IRCompute) } builder
     | IRCompute inner ->
         let (code, ctx') = genComputeBinding ctx binding builder inner
         // G90: a per-group row map the ragged peel emitted as a grouped value
@@ -1035,7 +1090,8 @@ and genBindingDispatch (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         let valueStr = exprToCppCtx ctx binding.Value
         let code = [$"{ind}auto {name} = {valueStr};"]
         let ctx' = addVarName binding.Id name ctx
-        (code, ctx')
+        // a `<$>` stage that names it applies its stages in order (expandStage)
+        (code, { ctx' with StageCompositions = Map.add binding.Id binding.Value ctx'.StageCompositions })
 
     | IRComposeObj _ ->
         // Defer: ObjectLoop composition, materialized when applied via <@>
@@ -1316,7 +1372,8 @@ and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
     // would force a LATER member's producer ahead of an EARLIER member's
     // compute and reverse the first failure. genMemberOrderedTupleBinding
     // evaluates the members left to right instead.
-    | IRTuple elems when not (isWhollyDeferredTuple ctx elems) && tupleNeedsMemberOrder ctx binding.Value ->
+    | IRTuple elems when not (isWhollyDeferredTuple ctx elems)
+                         && (tupleNeedsMemberOrder ctx binding.Value || tupleHoldsArrayGuard binding.Value) ->
         genMemberOrderedTupleBinding ctx binding builder
     // An `if` whose branch is such a tuple, or an explicit compute of an
     // unforced array (gap G59): the taken branch is evaluated, member by
@@ -1341,6 +1398,20 @@ and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
     | _ ->
     let ind = indentStr ctx
     let name = bindingCppName binding
+    // A named explicit compute below the root (T18): `h1(m |> compute) + 1`,
+    // a block's tail, a tuple member's call -- evaluated into a temporary
+    // before the statement when m cannot fail (hoistNamedComputeSlots). The
+    // IRIndex arm below materializes a computed subscript BASE itself.
+    let hoisted =
+        match binding.Value with
+        | IRIndex (b, _, _) when (namedComputeSlotOf ctx Set.empty b).IsSome -> Ok None
+        | v -> hoistNamedComputeSlots ctx builder name (forcedAliasClosure ctx (collectDeferredPositionalReads ctx v)) v
+    match hoisted with
+    | Error why -> (codegenError ctx ind why, addVarName binding.Id name ctx)
+    | Ok (Some (hoistCode, ctxH, value')) ->
+        let (code, ctx') = genScalarExprBinding ctxH { binding with Value = value' } builder
+        (hoistCode @ code, ctx')
+    | Ok None ->
     // Force deferred producers read positionally inside a compound scalar
     // expression (`let x = A(0) + A(1)`, `if A(0) > 0.0 then ...`). The direct
     // single-read case (`let x = A(i)`) is handled by the dedicated IRIndex arm
@@ -1478,6 +1549,22 @@ and tupleNeedsMemberOrder (ctx: CodeGenContext) (value: IRExpr) : bool =
 and memberNeedsOrder (ctx: CodeGenContext) (e: IRExpr) : bool =
     IRLift.memberNeedsOrderOf (deferredViewOf ctx) e
 
+/// The ARRAY-valued guard written in place as a tuple member, under any
+/// `|> compute` (lane x3: `(guard(false, cf), cf2)`). A tuple evaluates its
+/// members at its construction (formalism 10.2), and the guard is the body's
+/// cells or zeros of its shape (10.4): no expression renders that (the scalar
+/// conditional `(p ? cf : 0.0)` was a g++ error), so the member is computed
+/// into a temporary at its own position (genMemberOrderedTupleBinding).
+and arrayGuardMember (e: IRExpr) : bool =
+    match stripComputeWrappers e with
+    | IRGuard _ as g -> (match stripUnits (inferExprType g) with ArrayElem _ -> true | _ -> false)
+    | _ -> false
+
+and tupleHoldsArrayGuard (value: IRExpr) : bool =
+    match value with
+    | IRTuple es -> es |> List.exists tupleHoldsArrayGuard
+    | e -> arrayGuardMember e
+
 /// A module- or block-level tuple value that holds an explicit compute of an
 /// unforced array (round-3 W1-3; the shape `(h |> compute, y |> compute)`
 /// returned from a block). `std::make_tuple` takes every member BY NAME, and
@@ -1548,6 +1635,9 @@ and genMemberOrderedTupleBinding (ctx: CodeGenContext) (binding: IRBinding) (bui
             | None when bareDeferredTupleMember accCtx leaf ->
                 let ty = match leaf with IRVar (_, t) -> t | _ -> inferExprType leaf
                 bindTemp (IRCompute leaf) ty
+            | None when arrayGuardMember leaf ->
+                let g = stripComputeWrappers leaf
+                bindTemp (IRCompute g) (inferExprType g)
             | None ->
                 // A plain name or literal (under any `|> compute`, the identity
                 // on a stored value) stays in place; anything else is bound as
@@ -2035,7 +2125,8 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             // the generic case below and fail to materialize.
             resolveComputation inner wrappers
         | IRFunctorMap (f, inner) ->
-            resolveComputation inner (f :: wrappers)
+            // a composed stage applies its stages in order (lane x3, expandStage)
+            resolveComputation inner (expandStage ctx f @ wrappers)
         | IRGuard (cond, body) ->
             // Resolve through guard: push wrappers into the body
             let (innerResolved, innerWrappers) = resolveComputation body wrappers
@@ -2097,6 +2188,26 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
 
     | IRComposeApply info ->
         genComputeComposeApplyBinding ctx binding builder name info functorWrappers applyFunctorWrappers
+
+    // A STAGE over a form whose arm below takes no wrappers (a method
+    // composition, a bind, a tree): it was dropped silently. The form is
+    // materialized first into a temporary of its own type and the stage is
+    // mapped over it, once per cell (as for a guard or a choice); a
+    // tuple-valued tree has no cells to map: refused.
+    | (IRComposeMeth _ | IRBind _ | IRParallel _ | IRFusion _) when not functorWrappers.IsEmpty ->
+        let formTy = inferExprType resolved
+        match formTy with
+        | ArrayElem _ ->
+            let tmp : IRBinding =
+                { Id = builder.FreshId(); Name = $"{name}__staged"; Type = formTy; Value = IRCompute resolved
+                  IsConst = true; IsMutable = false }
+            let (tmpCode, ctxT) = genBinding ctx tmp builder
+            let baseInfo = buildSimpleApplyInfo [ IRVar (tmp.Id, formTy) ] (List.head functorWrappers) binding.Type
+            let finalInfo = applyFunctorWrappers baseInfo (List.tail functorWrappers)
+            let code = genApplyCombinator ctxT name finalInfo builder
+            (tmpCode @ code, addVarName binding.Id name ctxT)
+        | _ ->
+            (codegenError ctx ind "a `<$>` stage over a tuple-valued computation tree is not built in the C++ lane: project the member first, or map each leg", addVarName binding.Id name ctx)
 
     | IRComposeMeth (left, right) ->
         genComputeComposeMethBinding ctx binding builder ind name left right
@@ -2183,14 +2294,26 @@ and private genComputeApplyBinding (ctx: CodeGenContext) (binding: IRBinding) (b
     // the deferred map) before this nest renders -- exactly what the
     // rearrangement combinators do for their inputs. Recursion through
     // genBinding handles chains: forcing k2i forces llsq/kksq first.
-    let (forceCode, ctx) =
+    // An inline STAGE written as the operand (`method_for(f <$> (a <|> b)) <@> k`,
+    // lane x3) has no loop form either: the nest named it `arr<i>`, undeclared
+    // (BL9002). It is computed into a temporary at its operand position, as
+    // `|> compute` of it would be (a lifted `f <$> c |> compute` arrives here
+    // already bound).
+    let (forceCode, ctx, inlineArrays) =
         info'.Arrays
-        |> List.fold (fun (accCode, accCtx: CodeGenContext) arr ->
+        |> List.indexed
+        |> List.fold (fun (accCode, accCtx: CodeGenContext, acc) (i, arr) ->
             match arr with
             | IRVar (id, _) when Map.containsKey id accCtx.DeferredComputations ->
                 let (fcode, fctx, _) = forceDeferredArrayInput accCtx builder ($"{name}__in{id}") arr
-                (accCode @ fcode, fctx)
-            | _ -> (accCode, accCtx)) ([], ctx)
+                (accCode @ fcode, fctx, acc @ [ arr ])
+            | IRFunctorMap _ ->
+                let (fcode, fctx, arr') = forceDeferredArrayInput accCtx builder ($"{name}__op{i}") arr
+                (accCode @ fcode, fctx, acc @ [ arr' ])
+            | _ -> (accCode, accCtx, acc @ [ arr ])) ([], ctx, [])
+    let info' =
+        if info'.Arrays |> List.exists (function IRFunctorMap _ -> true | _ -> false)
+        then { info' with Arrays = inlineArrays } else info'
     // Same rule one slot over: a deferred binding the KERNEL closes over
     // is forwarded BY NAME as a capture argument at every call site, so it
     // must be materialized before the nest renders too (see
@@ -2428,6 +2551,7 @@ and private genComputeChoiceBinding (ctx: CodeGenContext) (binding: IRBinding) (
     // Computation-level choice: materialize both sides, element-wise combine
     // result[i] = (lhs[i] != 0) ? lhs[i] : rhs[i]
     // If functor wrappers present: f <$> (c1 <|> c2) == (f <$> c1) <|> (f <$> c2)
+    // (formalism 10.4, left distribution: the cell test is on the stage's RESULT)
     let wrapSide side =
         if functorWrappers.IsEmpty then side
         else functorWrappers |> List.fold (fun acc w -> IRFunctorMap(w, acc)) side
@@ -2457,9 +2581,15 @@ and private genComputeChoiceBinding (ctx: CodeGenContext) (binding: IRBinding) (
             (elemTypeToCpp (IRTScalar ETFloat64),
              codegenError ctx ind (sprintf "<|>: binding type is neither array nor scalar (got %A) -- likely a typechecker or IR bug" t))
 
+    // the cell test is against the zero of the RESULT's element type: a
+    // complex cell compares with the complex zero (G318: `!= 0` does not
+    // compile for std::complex); every other type keeps its literal 0
+    let zeroOf =
+        let elemIsComplex = match binding.Type with ArrayElem arr -> isComplexType arr.ElemType | t -> isComplexType t
+        if elemIsComplex then $"{elemType}(0)" else "0"
     if rank = 0 then
         // Scalar choice
-        let code = [$"{ind}{elemType} {name} = ({nameL} != 0) ? {nameL} : {nameR};"]
+        let code = [$"{ind}{elemType} {name} = ({nameL} != {zeroOf}) ? {nameL} : {nameR};"]
         let ctx' = addVarName binding.Id name ctxR
         (codeL @ [""] @ codeR @ [""] @ elemTypeErrCode @ code, ctx')
     else
@@ -2503,7 +2633,7 @@ and private genComputeChoiceBinding (ctx: CodeGenContext) (binding: IRBinding) (
         let idxStr = [for i in 0 .. rank - 1 -> $"[__i{i}]"] |> String.concat ""
         let lhsElem = $"{nameL}{idxStr}"
         let rhsElem = $"{nameR}{idxStr}"
-        loopLines <- loopLines @ [$"{(indD depth)}{name}{idxStr} = ({lhsElem} != 0) ? {lhsElem} : {rhsElem};"]
+        loopLines <- loopLines @ [$"{(indD depth)}{name}{idxStr} = ({lhsElem} != {zeroOf}) ? {lhsElem} : {rhsElem};"]
 
         for _ in 0 .. rank - 1 do
             depth <- depth - 1
@@ -2523,7 +2653,48 @@ and private genComputeGuardBinding (ctx: CodeGenContext) (binding: IRBinding) (b
         | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRFallback _ -> true
         | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
         | _ -> false
-    if isComputation then
+    let resolvedApply =
+        match body with
+        | IRApplyCombinator _ -> true
+        | IRVar (id, _) -> (match Map.tryFind id ctx.DeferredComputations with Some (IRApplyCombinator _) -> true | _ -> false)
+        | _ -> false
+    // A STAGE over a guard whose body is not one map application (a stored or
+    // computed array, a choice, a deferred choice binder, ...) takes the law's
+    // form (formalism 10.1 `f <$> c = c >>= pure . f`, 10.4 left zero):
+    // `f <$> guard(p, c)` IS `guard(p, f <$> c)` -- the staged body's cells
+    // where p holds, the zero of the RESULT's element type where it does not
+    // (f is never applied to a zero cell). The staged body is a computation,
+    // materialized below into a temporary of its own (the result's) type and
+    // guarded cell by cell. The concrete-body arm used to ignore the stage
+    // wrappers -- a same-type stage was silently dropped (`dbl <$> guard(true,
+    // cf)` printed cf) and a type-changing one named a temporary of the RESULT
+    // type over the body (BL9002, G317). That arm evaluates its body BEFORE the
+    // condition, so a stage that may fail is admitted only under the literal
+    // `true` (otherwise a false guard would run it: formalism 10.2, R6);
+    // anything else stays a coded refusal. A guard over ONE map application
+    // keeps the kernel wrap below, which composes the stage into the guarded
+    // kernel.
+    if not functorWrappers.IsEmpty && not resolvedApply then
+        let staged = functorWrappers |> List.fold (fun acc w -> IRFunctorMap (w, acc)) body
+        let stageTotal (w: IRExpr) =
+            match resolveCallable w with
+            | Some cl ->
+                Blade.IRTotality.auditCallable resolveCallable (fun i -> Map.tryFind i ctx.DeferredComputations)
+                    (fun i -> Map.containsKey i ctx.DeferredComputations) cl [] = Ok ()
+            | None -> false
+        let condIsTrue = (match cond with IRLit (IRLitBool true) -> true | _ -> false)
+        if condIsTrue || List.forall stageTotal functorWrappers then
+            // the staged body has the RESULT's type (a guard keeps its body's)
+            let tmp : IRBinding =
+                { Id = builder.FreshId(); Name = $"{name}__staged"; Type = binding.Type; Value = IRCompute staged
+                  IsConst = true; IsMutable = false }
+            let (tmpCode, ctxT) = genBinding ctx tmp builder
+            let (code, ctx') = genComputeGuardBinding ctxT binding builder inner ind name [] applyFunctorWrappers cond (IRVar (tmp.Id, binding.Type))
+            (tmpCode @ code, ctx')
+        else
+            (codegenError ctx ind "a `<$>` stage that may fail over a guard of a non-map body is not built in the C++ lane: its cells would be evaluated before the guard's condition, which evaluates the stage only where the condition holds (formalism 10.2 / 10.4): map the stage over a computed array under an `if` instead",
+             addVarName binding.Id name ctx)
+    elif isComputation then
         // Resolve the inner computation
         let resolvedBody =
             match body with
@@ -2547,8 +2718,29 @@ and private genComputeGuardBinding (ctx: CodeGenContext) (binding: IRBinding) (b
                 | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> IRLit (IRLitInt 0L)
                 | t when scalarElemOf t = Some ETFloat32 -> IRLit (IRLitFloat32 0.0f)
                 | _ -> IRLit (IRLitFloat 0.0)
+            // A STAGE over the guard of ONE map application obeys left
+            // distribution (formalism 10.1 `f <$> c = c >>= pure . f`, 10.4
+            // left zero): `f <$> guard(p, L <@> k)` IS `guard(p, L <@> (f . k))`
+            // -- the stage composes into the kernel FIRST and the composed
+            // kernel is guarded, so a cell where p is false is the zero of
+            // the STAGE's result type, never f applied to a zero cell (the
+            // reverse order printed `inc <$> guard(false, m)` as f(0) = 1.0
+            // per cell). A Reynolds kernel keeps the as-written order (its
+            // stage is the post-sum envelope, which the per-term guard cannot
+            // wrap), as the interpreter's forceGuard does: OPEN in rows-x.md.
+            let (_, rdesc) = peelReynolds info.Kernel
+            let composeFirst = not functorWrappers.IsEmpty && not rdesc.HasReynolds
+            let (info, afterWrappers) =
+                if composeFirst then (applyFunctorWrappers info functorWrappers, [])
+                else (info, functorWrappers)
+            // the composed callable keeps the kernel's RetType: the zero is
+            // the outermost stage's result type's
+            let zeroType (c: IRCallable) =
+                if composeFirst then
+                    functorWrapperRetType (List.last functorWrappers) |> Option.defaultValue c.RetType
+                else c.RetType
             let buildGuarded (c: IRCallable) : IRExpr =
-                let zeroVal = zeroForReturnType c.RetType
+                let zeroVal = zeroForReturnType (zeroType c)
                 let synthetic =
                     { c with Id = builder.FreshId()
                              Body = IRIf (cond, c.Body, zeroVal) }
@@ -2562,8 +2754,8 @@ and private genComputeGuardBinding (ctx: CodeGenContext) (binding: IRBinding) (b
             // silently dropping the guard predicate.
             let wrappedKernel = mapKernelInner buildGuarded info.Kernel
             let guardedInfo = { info with Kernel = wrappedKernel }
-            // Apply any functor wrappers
-            let finalInfo = applyFunctorWrappers guardedInfo functorWrappers
+            // a Reynolds kernel's stage stack, after the guard
+            let finalInfo = applyFunctorWrappers guardedInfo afterWrappers
             // the guarded map's nest reads its operands, captures and range
             // sources by name, as the canonical arm's does: a deferred one
             // is forced first (floor round F9: `guard(c, method_for(dd) <@>
@@ -2575,6 +2767,20 @@ and private genComputeGuardBinding (ctx: CodeGenContext) (binding: IRBinding) (b
             let code = genApplyCombinator ctx name finalInfo builder
             let ctx' = addVarName binding.Id name ctx
             (forceCode @ code, ctx')
+        // An ARRAY body that is another deferred form (a choice, a fallback, a
+        // staged map, a composition): materialized first into a temporary of
+        // its own type, then guarded cell by cell as a concrete array (the arm
+        // below). The scalar ternary it fell to named an array where a scalar
+        // goes (`guard(true, a <|> b) |> compute`: BL9002).
+        | _ when (match binding.Type with ArrayElem _ -> true | _ -> false)
+                 && (match inferExprType body with ArrayElem _ -> true | _ -> false) ->
+            let bodyTy = inferExprType body
+            let tmp : IRBinding =
+                { Id = builder.FreshId(); Name = $"{name}__gsrc"; Type = bodyTy; Value = IRCompute body
+                  IsConst = true; IsMutable = false }
+            let (tmpCode, ctxT) = genBinding ctx tmp builder
+            let (code, ctx') = genComputeGuardBinding ctxT binding builder inner ind name functorWrappers applyFunctorWrappers cond (IRVar (tmp.Id, bodyTy))
+            (tmpCode @ code, ctx')
         | _ ->
             // Non-apply computation (parallel, fusion, etc.) -- fall back to scalar guard
             let guardExpr = IRGuard (cond, body)
@@ -4333,7 +4539,9 @@ and forceDeferredArrayInput (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase:
         // Inline computation as the array argument: materialize into a
         // synthetic temporary and rearrange over that.
         let tmpId = builder.FreshId()
-        let ty = inferExprType expr
+        // a stage over an array is an array (stagedArrayType; IR.typeOf says
+        // the stage's scalar return type), and so is the temporary's reference
+        let ty = match stagedArrayType ctx (IRCompute expr) with Some t -> t | None -> inferExprType expr
         let matBinding = { Id = tmpId; Name = tmpBase; Type = ty; Value = IRCompute expr; IsConst = true; IsMutable = false }
         let (code, ctx1) = genBinding ctx matBinding builder
         (code @ [""], ctx1, IRVar (tmpId, ty))
@@ -4458,6 +4666,86 @@ and treeLeafInputForces (ctx: CodeGenContext) (builder: IRBuilder) (name: string
 /// composes cleanly with the per-input forcing the rearrangement combinators do.
 and forceDeferredPositionalReads (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase: string) (value: IRExpr) : string list * CodeGenContext =
     forceDeferredBindingIds ctx builder tmpBase (collectDeferredPositionalReads ctx value)
+
+/// A deferred binder whose evaluation CANNOT FAIL (T18, borrow round): its
+/// chain of deferred aliases ends at a map whose kernel passes the closed
+/// totality whitelist (IRTotality.auditApply) and whose every input -- an
+/// operand, a deferred kernel capture -- is a stored array, a parameter, a
+/// plain range with no deferred structural source, or another such binder.
+/// Forcing one has no observable effect but its cells, so it may run earlier
+/// than its use; under the borrow rule (formalism 10.2) its cells are the
+/// same wherever it runs. Anything else (a zip, a composition, a choice, a
+/// map over a run-time keyed range, an unresolved kernel) answers false.
+and deferredBinderIsTotal (ctx: CodeGenContext) (id: IRId) : bool =
+    let isDef (i: IRId) = Map.containsKey i ctx.DeferredComputations
+    let rec go (seen: Set<IRId>) (id: IRId) =
+        if seen.Contains id then false else
+        let seen = seen.Add id
+        match Map.tryFind id ctx.DeferredComputations with
+        | Some (IRVar (src, _)) -> go seen src
+        | Some (IRApplyCombinator info) ->
+            let inputOk (a: IRExpr) =
+                match a with
+                | IRVar (aid, _) when isDef aid -> go seen aid
+                | IRVar _ | IRParam _ -> true
+                | IRRange (ixs, _) ->
+                    ixs |> List.forall (fun ix ->
+                        match ix.Extent with
+                        | IRSparseKeys (SkRuntime (IRVar (kid, _))) -> not (isDef kid)
+                        | IRCompoundMask (IRVar (mid, _)) -> not (isDef mid)
+                        | _ -> true)
+                | _ -> false
+            Blade.IRTotality.auditApply resolveCallable (fun i -> Map.tryFind i ctx.DeferredComputations) isDef info = Ok ()
+            && List.forall inputOk info.Arrays
+            && (collectDeferredKernelCaptures ctx info.Kernel |> List.forall (go seen))
+        | _ -> false
+    go Set.empty id
+
+/// THE NAMED EXPLICIT COMPUTES OF A STATEMENT, evaluated before it (review row
+/// T18, borrow round). `m |> compute` over a deferred binder m in a by-name
+/// slot (CodeGenFusion.namedComputeSlotOf: a call argument below the root
+/// call, a subscript base, ...) rendered `m` by name, and nothing declared it:
+/// BL9002 in a function body, a block-valued statement, a nested call. Each is
+/// now evaluated into a temporary before the statement -- a copy of the
+/// computation, exactly as `let c = m |> compute` (m stays deferred, unprinted)
+/// -- and the slot reads the temporary. Hoisting moves the evaluation ahead of
+/// the statement's other parts, so it is admitted only for a binder that
+/// cannot fail (deferredBinderIsTotal; formalism 10.2 and the round's R6:
+/// where a failure fires must not move); under the borrow rule a write to its
+/// inputs while it is still used is refused, so its cells are those of the
+/// use. A binder that may fail is refused (BL7004) with the steer to compute
+/// it in a statement of its own. `excluded`: the ids the statement's own
+/// pre-pass forces (forcedAliasClosure), whose computes keep today's emission.
+/// None when the statement holds no such slot (the caller's emission is then
+/// unchanged, byte for byte).
+and hoistNamedComputeSlots (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase: string) (excluded: Set<IRId>) (value: IRExpr)
+        : Result<(string list * CodeGenContext * IRExpr) option, string> =
+    if List.isEmpty (namedComputeSlotsIn ctx excluded value) then Ok None else
+    let mutable accCtx = ctx
+    let code = System.Collections.Generic.List<string>()
+    let refused = System.Collections.Generic.List<string>()
+    let mutable k = 0
+    let value' =
+        value |> rewriteByNameOperands (fun a ->
+            match namedComputeSlotOf accCtx excluded a with
+            | Some (id, ty) when deferredBinderIsTotal accCtx id ->
+                let tmp : IRBinding =
+                    { Id = builder.FreshId(); Name = $"{tmpBase}__c{k}"; Type = ty; Value = IRCompute (IRVar (id, ty))
+                      IsConst = true; IsMutable = false }
+                k <- k + 1
+                let (c, ctx') = genBinding accCtx tmp builder
+                code.AddRange c
+                accCtx <- ctx'
+                Some (IRVar (tmp.Id, ty))
+            | Some (id, _) ->
+                let shown = Map.tryFind id accCtx.VarNames |> Option.defaultValue (string id)
+                if not (refused.Contains shown) then refused.Add shown
+                Some a
+            | None -> None)
+    if refused.Count > 0 then
+        let who = String.concat ", " refused
+        Error ($"`{who} |> compute` inside a larger expression would be evaluated before the statement, ahead of its other parts, and the map may fail -- an order formalism 10.2 does not have (review row T18): bind `let c = {who} |> compute` in a statement of its own first and read `c`")
+    else Ok (Some (List.ofSeq code, accCtx, value'))
 
 /// Materialize each deferred binding id in `ids`, threading the ctx so a
 /// binding forced by an earlier id (or already forced by the caller) is
@@ -7236,12 +7524,20 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
         | _ -> []
     let holderEmitted = System.Collections.Generic.HashSet<int>()
     // a bound's CELL read of a deferred map forces it UNDER ITS OWN NAME at the
-    // range's position (formalism 10.2; an extent read does not, G218); a cell
-    // read of an operand THIS fold already evaluated privately would need its
-    // named snapshot restored first -- not built, a coded refusal (Codex diff
-    // review round 3)
-    let holdersBefore (c: CodeGenContext) (priv: IRId list) (pos: int) : string list * CodeGenContext =
-        holderPlan |> List.fold (fun (lines: string list, c: CodeGenContext) (p, bounds: IRExpr list, render) ->
+    // range's position (formalism 10.2; an extent read does not, G218). A cell
+    // read of an operand THIS fold already evaluated privately (gap G209,
+    // functions/1061, 1063, 1064) restores the operand's deferred record and
+    // forces it under its own name there too -- the interpreter's named
+    // snapshot, a second evaluation over the same inputs, as G243's restored
+    // capture does: it prints, it is stored after the fold, and its cells are
+    // the private copy's (nothing between the two evaluations may write an
+    // input of it: an operand map that writes is stored at its definition,
+    // G45, and a seed, leaf or bound that writes one is refused by the borrow
+    // rule); it cannot fail where the private evaluation did not (the same
+    // inputs). It used to be a coded refusal (Codex diff review round 3).
+    // Returns the operands still private.
+    let holdersBefore (c: CodeGenContext) (priv: IRId list) (pos: int) : string list * CodeGenContext * IRId list =
+        holderPlan |> List.fold (fun (lines: string list, c: CodeGenContext, priv: IRId list) (p, bounds: IRExpr list, render) ->
             if p < pos && holderEmitted.Add p then
                 let reads = bounds |> List.collect (collectDeferredPositionalReads ctx) |> List.distinct
                 // through deferred ALIASES and projections (seedReadClosure's chain)
@@ -7279,15 +7575,23 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
                          | _ -> false)
                     | IRBinOp (_, (IRAdd | IRSub | IRMul), x, y, _) -> safeBound x && safeBound y
                     | _ -> false
-                if closure |> List.exists (fun id -> List.contains id priv) then
-                    (lines @ refusal "reads a cell of one of its own operands in a range bound", c)
-                elif not reads.IsEmpty && not (bounds |> List.forall safeBound) then
-                    (lines @ refusal "evaluates a range bound that reads a deferred map beside another name, a branch or an operation that may fail", c)
+                if not reads.IsEmpty && not (bounds |> List.forall safeBound) then
+                    (lines @ refusal "evaluates a range bound that reads a deferred map beside another name, a branch or an operation that may fail", c, priv)
                 else
+                let restored = closure |> List.filter (fun id -> List.contains id priv) |> List.distinct
+                let c =
+                    restored |> List.fold (fun (c0: CodeGenContext) pid ->
+                        { c0 with
+                            DeferredComputations = Map.add pid ctx.DeferredComputations.[pid] c0.DeferredComputations
+                            VarNames =
+                                match Map.tryFind pid ctx.VarNames with
+                                | Some n -> Map.add pid n c0.VarNames
+                                | None -> Map.remove pid c0.VarNames }) c
+                let priv = priv |> List.filter (fun id -> not (List.contains id restored))
                 let pending = reads |> List.filter (fun id -> Map.containsKey id c.DeferredComputations)
                 let (code, c1) = forceDeferredBindingIds c builder ($"{bindingCppName binding}__rng") pending
-                (lines @ code @ render c1, c1)
-            else (lines, c)) ([], c)
+                (lines @ code @ render c1, c1, priv)
+            else (lines, c, priv)) ([], c, priv)
     let holderPosOf (id: IRId) : int =
         match compExpr with
         | IRApplyCombinator info ->
@@ -7299,7 +7603,7 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
         deferredOperandIds |> List.fold (fun (accCtx: CodeGenContext, accLines, accPriv) id ->
             // G209: the range holders of LOWER operand positions first -- the
             // operands are evaluated in position order (Codex diff review)
-            let (pre, accCtx) = holdersBefore accCtx accPriv (holderPosOf id)
+            let (pre, accCtx, accPriv) = holdersBefore accCtx accPriv (holderPosOf id)
             let accLines = accLines @ pre
             // a capture force above may have materialized it already (an
             // operand of a captured map; Codex design review, G214)
@@ -7340,7 +7644,7 @@ and genReduceComputeBindingUnheld (ctx: CodeGenContext) (binding: IRBinding) (bu
     // names, after the operands (the seed is evaluated after them)
     // G209: the fold's RANGE holders after the last forced operand's position
     // -- before the guard (which reads them) and the seed
-    let (holderDecls, ctxForced) = holdersBefore ctxForced privateIds System.Int32.MaxValue
+    let (holderDecls, ctxForced, privateIds) = holdersBefore ctxForced privateIds System.Int32.MaxValue
     // G249: THE CO-ITERATION EXTENT GUARDS of the fold (BL8011), after the
     // operands and captures are forced and before the seed (the operands are
     // the fold's first stage; G207's order) -- so before the first cell,
@@ -7690,6 +7994,10 @@ and private collectReduceDeferredCaptureIds (ctx: CodeGenContext) (compExpr: IRE
             // too (G214 / G218, Codex diff review round 1: it used to be
             // evaluated only by the interpreter's extent force)
             | Some (IRGuard _ | IRChoice _ | IRFallback _) -> true
+            // a captured deferred TUPLE reaches the force too, which refuses
+            // it with its coded BL7004 (gap G326: the kernel body reads
+            // `t[k]` of a tuple nothing declares -- it was BL9002)
+            | Some (IRTuple _) -> true
             | Some (IRVar (r, _)) when (ctx.Indent > 0 || Map.containsKey id ctx.DeferredAliasOf)
                                       && not (seen.Contains r) -> isMap (seen.Add r) r
             | _ -> false
@@ -10505,10 +10813,21 @@ and genGuardBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
         | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRSequence _ -> true
         | IRVar (id, _) -> Map.containsKey id ctx.DeferredComputations
         | _ -> false
-    if leafIsComputation body then
+    // An ARRAY-valued guard over a stored or computed array (lane x3) was
+    // emitted as a scalar conditional, `(p ? A : 0.0)`, a g++ error. At module
+    // level it is an uncomputed value like a guard of a map (formalism 10.2):
+    // it defers, the rule IRLift.computeDeferredIds and the interpreter's
+    // shouldDeferBinding apply (`resultIsArray`). In a block or a function body
+    // the interpreter evaluates the let where it is bound (Core.evalExpr's
+    // IRGuard arm: the body's cells, or zeros of its shape), so it is computed
+    // here, at its binding, under its own name.
+    let resultIsArray = match stripUnits binding.Type with ArrayElem _ -> true | _ -> false
+    if leafIsComputation body || (resultIsArray && ctx.Indent = 0) then
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
         ([$"{ind}// {name} = <deferred guard>"], ctx')
+    elif resultIsArray then
+        genBinding ctx { binding with Value = IRCompute binding.Value } builder
     else
         // Scalar guard: generate directly
         let code = genScalarBinding ctx name binding.Value binding.Type

@@ -1,4 +1,6 @@
-// TEST: Refold After Write Reads The Snapshot
+// TEST: Refold After Write Reads The Snapshot (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G199).
 // Gap G199: the first fold over q forces d under its own name (p is
 // evaluated privately); after x(1) is written the second fold evaluates p
 // again -- over the stored d -- and so does the later read of p.
@@ -10,6 +12,4 @@ let w = reduce(q, (+), 0.0)
 x(1) = 50.0
 let w2 = reduce(q, (+), 0.0)
 let z = p(1)
-// EXPECT: w = 83.0
-// EXPECT: w2 = 83.0
-// EXPECT: z = 5.0
+// ERROR: BL4005 @ 11:1

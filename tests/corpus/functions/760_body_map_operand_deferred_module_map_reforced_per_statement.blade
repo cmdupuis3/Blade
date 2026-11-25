@@ -1,4 +1,6 @@
-// TEST: A Body Map Over A Deferred Module Map Re-Forces It Per Statement
+// TEST: A Body Map Over A Deferred Module Map Re-Forces It Per Statement (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G256, G239, G75, G190).
 // ============================================================================
 // Gap G256 (lane B, round 4 wave 9; a G239 member at statement granularity),
 // fixed by lane C (C1): a deferred module map read as the OPERAND of a map in
@@ -17,4 +19,4 @@ function f() -> Int64 = {
     a(0) + z * 0
 }
 let s = f()
-// EXPECT: s = 2
+// ERROR: BL4005 @ 14:1

@@ -1,0 +1,37 @@
+// TEST: A Composed Stage Over A Choice Or A Guard Applies Its Stages In Order
+// ============================================================================
+// Borrow round, lane x3 (item 3). A `<$>` stage may be a composition `f >> g`,
+// inline or bound to a name, nested to any depth; it is f then g:
+// `(f >> g) <$> c = g <$> (f <$> c)`. The C++ lane put the composition VALUE in
+// a kernel slot, which takes a callable, and emitted the kernel as `(void)0`
+// (BL9002, "void value not ignored"). It now applies the composition's stages
+// in order (CodeGenState.expandStage). Over a choice each side takes the whole
+// stage before the cell test (10.4: the side `-2 * 0.0` is -0.0, a zero, so the
+// right side answers); over a guard the stages are zero-preserving. Pins by
+// hand.
+// ============================================================================
+let cf: Array<Float64 like Idx<3>> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like Idx<3>> = [9.0, 4.0, 3.0]
+let neg = lambda(z: Float64) -> -z
+let dbl = lambda(z: Float64) -> z * 2.0
+let half = lambda(z: Float64) -> z * 0.5
+let flag = cf(0) > 1.0
+let m = method_for(cf) <@> lambda(v) -> v
+let nd = neg >> dbl
+let dh = dbl >> half
+let ndd = nd >> dbl
+let r1 = nd <$> (cf <|> cf2) |> compute
+let r2 = (neg >> dbl) <$> (cf <|> cf2) |> compute
+let r3 = ndd <$> (cf <|> cf2) |> compute
+let r4 = dh <$> guard(flag, m) |> compute
+let r5 = dh <$> guard(false, m) |> compute
+let r6 = dh <$> guard(flag, cf2) |> compute
+let st = nd <$> (cf <|> cf2)
+let r7 = st |> compute
+// EXPECT: r1 = [-3.0, -8.0, 4.0]
+// EXPECT: r2 = [-3.0, -8.0, 4.0]
+// EXPECT: r3 = [-6.0, -16.0, 8.0]
+// EXPECT: r4 = [1.5, 0.0, -2.0]
+// EXPECT: r5 = [0.0, 0.0, 0.0]
+// EXPECT: r6 = [9.0, 4.0, 3.0]
+// EXPECT: r7 = [-3.0, -8.0, 4.0]

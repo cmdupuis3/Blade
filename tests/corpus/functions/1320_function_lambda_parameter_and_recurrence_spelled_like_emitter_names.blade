@@ -1,0 +1,33 @@
+// TEST: A function, a lambda parameter and a recurrence's reads spelled like emitter names
+// ============================================================================
+// Borrow round, lane x4 (gap G340). A function named `__fk` called inside a map
+// met the flat sweep's index (BL9002 "'__fk' cannot be used as a function"); a
+// lambda parameter `__i0` read in its body's outer product read the nest's
+// index (q2); a lambda parameter spelled like the sweep's index (p7); a
+// recurrence's step reading a binding spelled like its replay sweep's counter
+// `__rp_k`. Each spelling now moves.
+// ============================================================================
+type I = Idx<3>
+type K = Idx<4>
+let __rp_k: Float64 = 0.25
+let a: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let b: Array<Float64 like K> = [1.0, 2.0, 3.0, 4.0]
+function __fk(v: Float64) -> Float64 = v * 2.0
+let p6 = method_for(a) <@> lambda(v) -> __fk(v) + 1.0 |> compute
+let p7 = method_for(a) <@> lambda(__fk) -> __fk * 3.0 |> compute
+let f2 = lambda(__i0: Float64) -> {
+    let mm = method_for(a, b) <@> lambda(x, y) -> x * y + __i0 |> compute
+    reduce(reduce(mm, (+)), (+))
+}
+let q2 = f2(2.0)
+let rec x: Array<Float64 like Idx<6>> =
+    match x with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: k -> prefix :: prefix(k - 1) * __rp_k + 1.0
+let xs = reduce(x, (+))
+// EXPECT: p6 = [3.0, 5.0, 7.0]
+// EXPECT: p7 = [3.0, 6.0, 9.0]
+// EXPECT: q2 = 84.0
+// EXPECT: x = [1.0, 1.25, 1.3125, 1.328125, 1.33203125, 1.3330078125]
+// EXPECT: xs = 7.5556640625

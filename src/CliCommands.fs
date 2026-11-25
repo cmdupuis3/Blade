@@ -15,7 +15,7 @@ let compilerVersion = Blade.RunRecord.bladeVersion
 /// multiword ones also accept the unhyphenated spelling). Listed for `--help`.
 let internal usageTestBlockKeys =
     [ "access"; "alloc"; "attrs"; "cell-epilogue"; "cli"; "closure-capture"; "corpus-wiring"; "csv"; "cuda"; "diagnostics"; "display-frames"
-      "docs"; "doctor"
+      "docs"; "doctor"; "emitter-names"
       "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
       "ide-serve"; "instance-guards"; "knobs"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
       "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"; "orbit-scatter"; "owned-move"; "pch"; "print-form"
@@ -106,6 +106,10 @@ let printUsage () =
     printfn "  test opt-diff [<dir>]             Diff every program with all optimizer gates OFF vs ON"
     printfn "  test opt-diff-licensed [<dir>]    ... the same under the default (licensed) FP policy, 1e-9 token rule"
     printfn "  test llvm [<dir>|all]             The BLADE_LLVM lane vs the C++ lane (standalone only)"
+    printfn "  test borrow-oracle [<dir>...] [--strict] [--census <path>]"
+    printfn "                                    Interpreter readings A (at the binding) vs B (at each use)"
+    printfn "  test borrow-gen [--seed N] [--count K] [--out <dir>] [--interp-only] [--strict]"
+    printfn "                                    Seeded borrow-class programs: readings A vs B, C++ vs interp"
     printfn "  test docs [<page>]                Check every ```blade block in CLAUDE.md and docs/"
     printfn "                                    (run it when it pins values; <page> filters by path)"
     printfn "  test smoke                        A fixed sample of the corpus (every directory's first file"

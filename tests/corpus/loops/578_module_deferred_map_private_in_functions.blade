@@ -1,4 +1,6 @@
-// TEST: Module Deferred Map Private In Functions
+// TEST: Module Deferred Map Private In Functions (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G75).
 // ----------------------------------------------------------------------------
 // Gap G75 (formalism 10.2, the print rule): a module deferred map that only
 // function bodies force is evaluated inside each call, privately, from the
@@ -24,8 +26,4 @@ let two = scaled(2)
 let three = patched(7)
 z(1) = 5
 let four = at(1)
-// EXPECT: z = [1, 5, 3]
-// EXPECT: one = 21
-// EXPECT: two = 120
-// EXPECT: three = 57
-// EXPECT: four = 51
+// ERROR: BL4005 @ 26:1

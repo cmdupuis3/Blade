@@ -1,0 +1,14 @@
+// TEST: An Explicit Compute Of A Map That May Fail Below The Root Call Is Refused (rejects)
+// Review row T18 (borrow round, lane x): evaluating `q |> compute` before the statement would move
+// a possible failure ahead of the statement's other parts (formalism 10.2), so a map that may fail
+// in such a slot is a coded refusal (BL7004) with the steer to compute it in its own statement; it
+// used to be an undeclared `q` (BL9002).
+// REJECT-AT: codegen
+// ERROR-CONTAINS: inside a larger expression would be evaluated before the statement
+// WARN-CODEGEN: inside a larger expression would be evaluated before the statement
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let q = method_for(a) <@> lambda(v) -> 10 / v
+function h1(p: Array<Int64 like Row>) -> Int64 = p(0)
+function run() -> Int64 = h1(q |> compute) + 1
+let r = run()

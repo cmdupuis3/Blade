@@ -1,0 +1,10 @@
+// TEST: borrow a write after the last fold of a map that never prints is accepted
+// R5's twin of 002: g is only folded (a fold fuses and forces nothing), so it
+// never prints, and the write follows its last use.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(g, (+))
+x(0) = 5.0
+let b = x(0)
+// EXPECT: s = 12.0
+// EXPECT: b = 5.0

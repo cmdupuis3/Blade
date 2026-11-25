@@ -1,0 +1,30 @@
+// TEST: A Stage Over An Uncomputed Map Stores Its Own Result Type
+// ============================================================================
+// Borrow round, lane o: the stage result class (functions/1260) over an
+// uncomputed map (the stage fuses into the map's kernel; already right before
+// the fix, pinned so it stays so). Pins from the C++ lane.
+// ============================================================================
+let cf: Array<Float64 like Idx<2>> = [1.5, -2.0]
+let cb: Array<Bool like Idx<2>> = [true, false]
+let ci: Array<Int64 like Idx<2>> = [3, -4]
+let positive = lambda(z: Float64) -> z > 0.0
+let number = lambda(v: Bool) -> Float64(v)
+let trunc = lambda(z: Float64) -> Int64(floor(z))
+let half = lambda(k: Int64) -> Float64(k) * 0.5
+let narrow = lambda(z: Float64) -> Float32(z)
+let lift = lambda(z: Float64) -> complex(z, 1.0)
+let mf = method_for(cf) <@> lambda(v) -> v
+let mb = method_for(cb) <@> lambda(v) -> v
+let mi = method_for(ci) <@> lambda(v) -> v
+let r_bool = positive <$> mf |> compute
+let r_num = number <$> mb |> compute
+let r_int = trunc <$> mf |> compute
+let r_flt = half <$> mi |> compute
+let r_f32 = narrow <$> mf |> compute
+let r_cpx = lift <$> mf |> compute
+// EXPECT: r_bool = [true, false]
+// EXPECT: r_num = [1.0, 0.0]
+// EXPECT: r_int = [1, -2]
+// EXPECT: r_flt = [1.5, -2.0]
+// EXPECT: r_f32 = [1.5, -2.0]
+// EXPECT: r_cpx = [(1.5,1.0), (-2.0,1.0)]

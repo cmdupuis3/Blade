@@ -1,0 +1,10 @@
+// TEST: borrow the inner map computed, then the outer copied, then a write is accepted
+// g2c is fresh storage: copying g5 forces nothing that reads y.
+type I = Idx<3>
+let mut y: Array<Float64 like I> = [2.0, 0.0, 1.0]
+let g2c = method_for(y) <@> lambda(v) -> v + 1.0 |> compute
+let g5 = method_for(g2c) <@> lambda(a) -> a * 3.0
+let c6 = g5 |> compute
+y(2) = 9.0
+// EXPECT: c6 = [9.0, 3.0, 6.0]
+// EXPECT: g2c = [3.0, 1.0, 2.0]

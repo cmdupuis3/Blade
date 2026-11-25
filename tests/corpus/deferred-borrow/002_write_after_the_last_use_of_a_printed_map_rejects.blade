@@ -1,0 +1,13 @@
+// TEST: borrow a write after the last statement use of a map that prints (rejects)
+// R5 (the owner, 2026-11-23): PRINTING IS A USE. g is read by position at top
+// level, so it prints at the end of the program: the write after its last
+// statement use still precedes that use. (The accepted twin, a map only folded,
+// is 047.)
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(g, (+))
+let a = g(0)
+x(0) = 5.0
+let b = x(0)
+// ERROR: BL4005 @ 9:1
+// ERROR-CONTAINS: it prints at the end of the program

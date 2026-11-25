@@ -1,0 +1,31 @@
+// TEST: An Explicit Compute Of A Module Map Below A Statement's Root Call
+// Review row T18 (borrow round, lane x): `m |> compute` of a deferred module map inside a larger
+// expression -- a call operand of `+`, a block-valued statement's tail, a tuple member's call, a
+// function body's subscript base -- rendered `m` by name and nothing declared it (BL9002). A map
+// that cannot fail (the closed totality whitelist) is now evaluated into a private copy before the
+// statement: moving it is unobservable, and under the borrow rule its cells are those of the use.
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let mut other: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+function h1(q: Array<Int64 like Row>) -> Int64 = q(0)
+let k0: Int64 = 0
+let r1 = h1(good |> compute) + 1
+let r2 = { let k1: Int64 = 5; h(k1, good |> compute, good |> compute) + k0 }
+let r3 = (h1(good |> compute), 7)
+function base() -> Int64 = (good |> compute)(0) * 3
+function nested() -> Int64 = h1(good |> compute) + h1(good |> compute)
+let r4 = base()
+let r5 = nested()
+// EXPECT: r1 = 3
+// EXPECT: r2 = 9
+// EXPECT: r4 = 6
+// EXPECT: r5 = 4

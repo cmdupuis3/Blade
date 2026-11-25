@@ -1,8 +1,8 @@
-// TEST: A Function-Body Fold Evaluates Its Private Operands On Every Call
+// TEST: A Function-Body Fold Evaluates Its Private Operands On Every Call (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G243).
 // Gap G243 (round 4 wave 9 lane d; Codex design review): each call of total evaluates e and f
 // afresh (the second call sees the d write; the interpreter memoized e in the first call).
-// EXPECT: s1 = 50
-// EXPECT: s2 = 66
 type I = Idx<5>
 let mut d: Array<Int64 like I> = [1, 2, 3, 4, 5]
 let e = method_for(d) <@> lambda(a) -> a + 1
@@ -11,3 +11,4 @@ function total() -> Int64 = reduce(method_for(zip(e, f)) <@> lambda(a, b) -> a +
 let s1 = total()
 d((0 : I)) = 9
 let s2 = total()
+// ERROR: BL4005 @ 11:1

@@ -1,0 +1,12 @@
+// TEST: borrow a callee that writes a captured let mut (rejects)
+// bump writes the module array x it captures; a call of bump is a write of x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function bump() -> Int64 = {
+    x(0) = x(0) + 1.0
+    0
+}
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+let k = bump()
+let b = g(0)
+// ERROR: BL4005 @ 9:9

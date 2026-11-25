@@ -1,5 +1,7 @@
-// TEST: An imported deferred map under a deferred chain to fold
+// TEST: An imported deferred map under a deferred chain to fold (rejects)
 // MODULE: H
+// BORROW (2026-11-23): now refused at the write to H.x (BL4005, formalism 10.2, at lowering): an
+// uncomputed value over H.x is still used after it. The text below is the schedule it witnessed.
 // Round 4 wave 6 (the class-closure round of BLADE_COMPUTE_ELIDE=chain, gap
 // G108): Main folds q3 over p3 over H.d, a DEFERRED map of THIS module. The
 // chain arm read Main's deferred census only and took H.d as a stored operand
@@ -11,4 +13,3 @@
 module H
 let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
 let d = method_for(x) <@> lambda(v) -> v * 2.0
-// EXPECT: H.d = [2.0, 4.0, 6.0]

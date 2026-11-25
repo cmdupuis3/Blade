@@ -1,0 +1,14 @@
+// TEST: borrow an earlier operand writing unrelated storage is accepted
+// bump(other) writes storage seen does not read.
+type I = Idx<1>
+let mut cnt: Array<Int64 like I> = [10]
+let mut other: Array<Int64 like I> = [5]
+function bump(c: mut Array<Int64 like I>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h1(a: Array<Int64 like I>) -> Int64 = a(0)
+let seen = method_for(cnt) <@> lambda(v) -> v
+let r = bump(other) + h1(seen |> compute)
+// EXPECT: r = 16
+// EXPECT: other = [6]

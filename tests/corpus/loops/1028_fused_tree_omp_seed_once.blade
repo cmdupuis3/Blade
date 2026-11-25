@@ -1,9 +1,14 @@
 // TEST: the threaded fused-tree join evaluates its shared seed once, before the team
 // Gap G277: a where omp fold kernel over p <&!> q takes the threaded join
 // (BLADE_JOIN_THREADS, G7); its accumulators are seeded from the one value.
-let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+// BORROW (2026-11-23): a seed writing x, which the uncomputed leaves read, is refused (BL4005,
+// formalism 10.2), so the seed now bumps a counter no leaf reads: n = [1.0] is the one evaluation
+// (the old pins folded the written x).
+let x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let mut n: Array<Float64 like Idx<1>> = [0.0]
 let p = method_for(x) <@> lambda(v) -> v * 2.0
 let q = method_for(x) <@> lambda(v) -> v + 1.0
-let s = reduce(p <&!> q, lambda(u, w) where omp -> u + w, { x(0) = x(0) + 1.0; Float64(0) })
-// EXPECT: x = [2.0, 2.0]
-// EXPECT: s = (8.0, 6.0)
+let s = reduce(p <&!> q, lambda(u, w) where omp -> u + w, { n(0) = n(0) + 1.0; Float64(0) })
+// EXPECT: x = [1.0, 2.0]
+// EXPECT: n = [1.0]
+// EXPECT: s = (6.0, 5.0)

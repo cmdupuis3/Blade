@@ -3412,7 +3412,9 @@ let internal flatElementwisePlanOf
             // Distinct operand NAMES get one pool pointer each: `f(A, A)` puts
             // two ArrayPositions on one array, and two declarations of one
             // pointer name would be a g++ redeclaration error.
-            let poolOf (n: string) = $"__fp_{(sanitizeCppName n)}"
+            // ... and no pool pointer may be the sweep's cell count `__fp_cells`
+            // (a binding spelled `cells`: lane x3, prefixFamilyHole).
+            let poolOf (n: string) = $"""__fp_{(prefixFamilyHole ((=) "cells") (sanitizeCppName n))}"""
             let operandDecls =
                 codeGen.InputArrayNames
                 |> List.mapi (fun i n -> (i, n))

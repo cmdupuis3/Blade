@@ -1,4 +1,6 @@
-// TEST: Tuple Member Forces Its Inputs While Extent Reads Do Not
+// TEST: Tuple Member Forces Its Inputs While Extent Reads Do Not (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G199, G218).
 // Gap G199: a tuple VALUE evaluates its deferred member as a copy, which
 // forces the member inputs (d) under their own names, so z reads the cells
 // of that force, not the written x. extents(e) is NOT a forcing read (gap
@@ -17,6 +19,4 @@ x(0) = 10.0
 let z = d(0)
 let a = td[0]
 let ze = a(0)
-// EXPECT: n = 3
-// EXPECT: z = 2.0
-// EXPECT: ze = 30.0
+// ERROR: BL4005 @ 17:1

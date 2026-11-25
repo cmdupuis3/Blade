@@ -160,6 +160,34 @@ and InterpState = {
     /// cleared per fold. Kernel CAPTURES are unaffected: a capture forces under
     /// its own name (G214, the user decision of 2026-11-13).
     mutable PrivateOperandVals: Map<IRId, BladeArray>
+    /// The evaluation reading of an uncomputed array binding
+    /// (BLADE_INTERP_READING, the borrow oracle's instrument). ReadingToday
+    /// leaves every schedule below as it is.
+    Reading: DeferReading
+    /// Reading B's clock: how many writes the run has executed. A value
+    /// evaluated at write count n reads the inputs every later evaluation at
+    /// the same count would read. THE CLASS of interpreter paths that change
+    /// existing storage or rebind a name, and where each is counted:
+    ///   * IRAssign (evalAssign: a name rebound, a dense / compact / sparse
+    ///     element, a struct field), which every surface write lowers to: an
+    ///     element or whole write, `+=` (a parser desugar), a write through a
+    ///     view, alias or `mut` parameter (the callee's own IRAssign), a let
+    ///     rec buffer's rows (the rec desugar's assignments), the AD sweeps
+    ///     (synthesized source, so their accumulations are IRAssign too);
+    ///   * an IRForRange counter, rebound in place per trip.
+    /// Not counted, because no suspension can observe them: every other
+    /// writeCell in the interpreter fills storage it allocated for its own
+    /// result (map outputs, folds' accumulators, sort / set-op / linear-algebra
+    /// results are copies); a kernel's parameter cells are rebound per cell,
+    /// but a parameter is a fresh binding of each invocation that the
+    /// interpreter merely implements by reusing one cell, so a suspension
+    /// formed in one invocation reading the value of that invocation is the
+    /// language's reading; provider writes are not interpreted at all.
+    mutable WriteEpoch: int64
+    /// Reading B's reuse table: a suspension (by reference) -> the write count
+    /// it was evaluated at and its value. Reused only at the same count, and
+    /// only filled when the evaluation itself wrote nothing.
+    ReadMemo: Dictionary<Value, struct (int64 * Value)>
 }
 
 /// The header's fixed frame-store size (cpp/blade_runtime.hpp: `Frame stack[64]`).
@@ -169,7 +197,10 @@ let FrameCap = 64
 /// Build the interpreter state for a lowered module: the callables table
 /// (reusing IRPrint.buildCallablesTableForModule so let-bound lambda aliases resolve
 /// exactly as they do at codegen) plus zeroed budgets.
-let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
+/// Under an explicit evaluation reading (the borrow oracle runs two readings
+/// in one process, so it does not go through the knob); `makeState` below
+/// reads the knob.
+let makeStateWith (reading: DeferReading) (modul: IRModule) (limits: InterpLimits) : InterpState =
     let table = buildCallablesTableForModule modul
     let dict = Dictionary<IRId, IRCallable>()
     for kv in table do dict.[kv.Key] <- kv.Value
@@ -205,7 +236,17 @@ let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
         d
       ForcedDeferred = HashSet<IRId>()
       FunctionCallDepth = 0
-      PrivateOperandVals = Map.empty }
+      PrivateOperandVals = Map.empty
+      Reading = reading
+      WriteEpoch = 0L
+      // keyed on the suspension OBJECT: every use of one binding reads the
+      // same VDeferred out of its cell (Value's own equality is reference
+      // equality too; the comparer says so here, where it matters)
+      ReadMemo = Dictionary<Value, struct (int64 * Value)>(HashIdentity.Reference) }
+
+/// `makeStateWith` under the reading BLADE_INTERP_READING selects now.
+let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
+    makeStateWith (deferReadingFromKnob ()) modul limits
 
 // Shadow call stack push/pop + panic-time capture, mirroring blade_runtime.hpp.
 // Push at Blade function-body entry, pop on normal exit. On a panic the frames
@@ -701,6 +742,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
                 buildGroupKeysValue st env keys ty
             | IRSegments (offsets, _) -> segmentsValue offsets
             | IRSegmentsGrid bounds -> segmentsGridValue bounds
+            // reading A (BLADE_INTERP_READING=binding): an uncomputed array
+            // value is evaluated where it is bound
+            | _ when st.Reading = ReadingAtBinding -> forceAtBinding st (evalExpr st env value)
             | _ -> evalExpr st env value
         // Copy semantics for assignable array lets initialized from an
         // existing array (`let mut a = Z` -- st.MutableArrayLets): deep-copy
@@ -828,6 +872,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // conversion into `int32_t` / `float`).
         let v = match target with IRVar (_, ty) -> coerceScalarTo ty v | _ -> v
         evalAssign st env target v
+        // reading B's clock (InterpState.WriteEpoch): counted in every reading,
+        // read only by reading B
+        st.WriteEpoch <- st.WriteEpoch + 1L
         VUnit
 
     | IRForRange (vid, lo, hi, body) ->
@@ -847,6 +894,9 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         (try
             while i < hiV do
                 cell.V <- VInt i
+                // the counter is rebound in place: reading B's clock counts it
+                // as a write (InterpState.WriteEpoch)
+                st.WriteEpoch <- st.WriteEpoch + 1L
                 evalExpr st env body |> ignore
                 i <- i + 1L
          with InterpBreak -> ())
@@ -933,6 +983,19 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             | IRGuard (_, inner) -> leafIsComp inner
             | _ -> isDeferredOperand env e
         if leafIsComp body then VDeferred (expr, env)
+        elif (match stripUnits (typeOf body) with ArrayElem _ -> true | _ -> false) then
+            // An ARRAY-valued guard over a stored or computed array (lane x3; a
+            // block / function-body let, a tuple member): formalism 10.4,
+            // `guard(p, c)` is c where p holds, else the zero-filled array of c's
+            // shape and element type -- never a scalar 0.0. The body is read
+            // first and the condition after it, as Loops.forceGuard's concrete
+            // arm and the C++ lane's genComputeGuardBinding do.
+            let bodyVal = evalExpr st env body
+            if toBoolV (evalExpr st env cond) then bodyVal
+            else
+                match bodyVal with
+                | VArray a -> VArray (ArrayOps.allocDense a.ElemType a.IndexTypes a.Extents)
+                | _ -> raise (InterpUnsupported "guard: an array-typed body evaluated to no array")
         elif toBoolV (evalExpr st env cond) then evalExpr st env body
         else
             // The false arm: the renderer's type-appropriate zero, derived from
@@ -1252,6 +1315,28 @@ and private forceTupleMember (st: InterpState) (v: Value) : Value =
          | r -> forceTupleMember st r)
     | VTuple vs when vs |> Array.exists (fun x -> x.IsVDeferred || x.IsVTuple) ->
         VTuple (vs |> Array.map (forceTupleMember st))
+    | v -> v
+
+/// Reading A (BLADE_INTERP_READING=binding): the value a binding holds, with
+/// every uncomputed ARRAY in it evaluated now -- a suspension of array (or
+/// computation) type is forced; a deferred tuple has each member evaluated,
+/// recursively. A function value (`f >> g`, a composed loop object) and a
+/// loop object stay as they are: they are recipes, not borrowers (COMMON R2).
+and forceAtBinding (st: InterpState) (v: Value) : Value =
+    let forceable (e: IRExpr) =
+        match (try Some (stripUnits (typeOf e)) with _ -> None) with
+        | Some (ArrayElem _) | Some (IRTComputation _) | Some (IRTTuple _) -> true
+        | _ -> false
+    match v with
+    | VDeferred (IRCompose _, _) | VDeferred (IRComposeObj _, _) -> v
+    | VDeferred (IRTuple es, denv) ->
+        VTuple (es |> List.map (fun e -> forceAtBinding st (evalExpr st denv e)) |> Array.ofList)
+    | VDeferred (e, denv) when forceable e ->
+        (match forceValue st denv v with
+         | VDeferred _ as still -> still   // no force form: leave it (never loop)
+         | r -> forceAtBinding st r)
+    | VTuple vs when vs |> Array.exists (fun x -> x.IsVDeferred || x.IsVTuple) ->
+        VTuple (vs |> Array.map (forceAtBinding st))
     | v -> v
 
 /// Reify a callable id as a closure value, snapshotting the current frame's
@@ -1688,6 +1773,9 @@ let rec evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
     // members (docs/plans/structural/07 §3.2; genSegmentsBinding's twin).
     | IRSegments (offsets, _) -> segmentsValue offsets
     | IRSegmentsGrid bounds -> segmentsGridValue bounds
+    // reading A (BLADE_INTERP_READING=binding): evaluated here, at the binding
+    | v when st.Reading = ReadingAtBinding && shouldDeferBinding env b.Type v ->
+        forceAtBinding st (VDeferred (b.Value, env))
     | v when shouldDeferBinding env b.Type v ->
         VDeferred (b.Value, env)
     // A let chain whose final value defers (CodeGen.genLetChainBinding emits

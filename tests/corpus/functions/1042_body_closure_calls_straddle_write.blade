@@ -1,4 +1,6 @@
-// TEST: Two Calls Of A Body Lambda Straddling A Write Of The Map Input
+// TEST: Two Calls Of A Body Lambda Straddling A Write Of The Map Input (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G241, G239).
 // ============================================================================
 // Gap G241, round 4 wave 10 (lane C, C2): a lambda bound in a function body
 // that captures a deferred module map and is only CALLED there forces the map
@@ -17,4 +19,4 @@ function g(x: Int64) -> Int64 = {
     a + b
 }
 let r = g(1)
-// EXPECT: r = 8
+// ERROR: BL4005 @ 13:1

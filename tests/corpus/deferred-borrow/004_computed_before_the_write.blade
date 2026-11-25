@@ -1,0 +1,11 @@
+// TEST: borrow a computed map borrows nothing
+// `|> compute` detaches: c is fresh storage, a snapshot of g, so the write to
+// x after it is accepted and c keeps the cells it was computed with.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let c = g |> compute
+x(0) = 5.0
+let a = c(0)
+let s = reduce(c, (+))
+// EXPECT: a = 2.0
+// EXPECT: s = 12.0

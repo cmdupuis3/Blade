@@ -1,4 +1,6 @@
-// TEST: Sole Read Deferred Map Input Written
+// TEST: Sole Read Deferred Map Input Written (rejects)
+// BORROW, printing is a use (2026-11-23): now refused at the write (BL4005, formalism 10.2): the map prints, so it
+// is used at the end of the program, after the write. The text below is the schedule it witnessed (gap G60 (b)).
 // ----------------------------------------------------------------------------
 // Gap G60 (b): a module deferred map read EXACTLY ONCE (`a = g(0)`, never
 // aliased) and then its input written. The read forces the whole map at its
@@ -21,9 +23,4 @@ type W = Idx<2>
 let ws: Array<Float64 like W> = [1.0, 10.0]
 let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
 A(0) = 100.0
-// EXPECT: x = [0, 2]
-// EXPECT: g = [10, 5]
-// EXPECT: a = 10
-// EXPECT: A = [100.0, 2.0, 3.0, 4.0]
-// EXPECT: c = [2.0, 4.0, 6.0, 8.0]
-// EXPECT: out = [20.0, 200.0]
+// ERROR: BL4005 @ 17:1

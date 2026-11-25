@@ -1,0 +1,39 @@
+// TEST: A Stage Written Inline As A Loop Operand, Computed Or Not, Of Any Element Type
+// ============================================================================
+// Borrow round, lane x3 (item 4). `f <$> c` over an array computation c is an
+// array of c's shape whose cells are f's results (formalism 10.4). Written
+// inline as a loop operand under `|> compute`, the lowering binds it first,
+// typed by IR.typeOf as f's SCALAR return type: the C++ lane emitted a choice
+// under the stage as two scalar folds and read `.data` of a scalar (BL9002,
+// "std::complex<double> has no member named data" for a complex stage; the
+// Float64 twin failed the same way). The binding now takes the array type.
+// Without `|> compute` the operand reached the nest unnamed (`arr0`, BL9002);
+// it is computed into a temporary at its operand position. Complex and
+// Float64 stages, over a choice and over a guard of a map; a map, a zip and a
+// fold over the loop. Pins by hand.
+// ============================================================================
+let cf: Array<Float64 like Idx<3>> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like Idx<3>> = [9.0, 4.0, 3.0]
+let toC = lambda(z: Float64) -> Complex128(z)
+let re = lambda(z: Complex128) -> real(z)
+let dbl = lambda(z: Float64) -> z * 2.0
+let flag = cf(0) > 1.0
+let m = method_for(cf) <@> lambda(v) -> v
+let r1 = method_for(toC <$> (cf <|> cf2) |> compute) <@> re |> compute
+let r2 = method_for(dbl <$> (cf <|> cf2) |> compute) <@> lambda(v) -> v + 1.0 |> compute
+let r3 = method_for(toC <$> (cf <|> cf2)) <@> re |> compute
+let r4 = method_for(zip(toC <$> (cf <|> cf2) |> compute, cf)) <@> lambda(c, v) -> real(c) + v |> compute
+let r5 = method_for(toC <$> guard(flag, m) |> compute) <@> re |> compute
+let r6 = reduce(method_for(toC <$> (cf <|> cf2) |> compute) <@> re, (+))
+let r7 = method_for(toC <$> cf |> compute) <@> re |> compute
+let a2 = method_for(dbl <$> (cf <|> cf2)) <@> lambda(v) -> v + 1.0 |> compute
+let a4 = method_for(dbl <$> guard(true, m)) <@> lambda(v) -> v + 1.0 |> compute
+// EXPECT: r1 = [1.5, 4.0, -2.0]
+// EXPECT: r2 = [4.0, 9.0, -3.0]
+// EXPECT: r3 = [1.5, 4.0, -2.0]
+// EXPECT: r4 = [3.0, 4.0, -4.0]
+// EXPECT: r5 = [1.5, 0.0, -2.0]
+// EXPECT: r6 = 3.5
+// EXPECT: r7 = [1.5, 0.0, -2.0]
+// EXPECT: a2 = [4.0, 9.0, -3.0]
+// EXPECT: a4 = [4.0, 1.0, -3.0]

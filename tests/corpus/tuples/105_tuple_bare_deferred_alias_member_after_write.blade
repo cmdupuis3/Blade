@@ -1,4 +1,6 @@
-// TEST: Tuple Bare Deferred Alias Member After Write
+// TEST: Tuple Bare Deferred Alias Member After Write (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, the tuple twin: a bare deferred ALIAS held in a tuple after a
 // writing member is a copy made at its position, (1, [11]), and the class it
@@ -15,5 +17,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
     c(0)
 }
 let t = (bump(cnt), seen2)
-// EXPECT: t = (1, [11])
-// EXPECT: cnt = [1]
+// ERROR: BL4005 @ 18:10

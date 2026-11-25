@@ -1,4 +1,6 @@
-// TEST: Deferred Input Mutated After Alias Force
+// TEST: Deferred Input Mutated After Alias Force (rejects)
+// BORROW, printing is a use (2026-11-23): now refused at the write (BL4005, formalism 10.2): the map prints, so it
+// is used at the end of the program, after the write. The text below is the schedule it witnessed (gap G60).
 // ----------------------------------------------------------------------------
 // Finding 3, alias-first: the class is forced through the ALIAS (`g2(0)`,
 // `g2(1)`), then the input is zeroed. Every name -- g, g2, and an alias h3
@@ -13,9 +15,4 @@ let a = g2(0)
 let b = g2(1)
 x(0) = 0
 let h3 = g
-// EXPECT: g = [10, 5]
-// EXPECT: g2 = [10, 5]
-// EXPECT: h3 = [10, 5]
-// EXPECT: a = 10
-// EXPECT: b = 5
-// EXPECT: x = [0, 2]
+// ERROR: BL4005 @ 15:1

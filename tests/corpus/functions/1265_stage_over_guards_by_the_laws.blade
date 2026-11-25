@@ -1,0 +1,28 @@
+// TEST: A Stage That Moves A Zero Over A Choice Of Guards Or A Guard Of A Guard Is Refused (rejects)
+// ERROR: BL4022 @ 22:10
+// ERROR-CONTAINS: is refused: its result would depend on whether the
+// Lane z (borrow round, 2026-11-24; gap G335, formalism 10.4): a `<$>` stage that moves a zero is refused
+// over an uncomputed guard or choice (BL4022). This test's SUBJECT was that refused reading (the laws
+// through nesting, for stages that move a zero), so it is a (rejects) probe now; the nests are kept with a
+// stage the rule accepts in stage-zero/005 (n2, n3, n4, n10) and b5 in functions/1313 a7.
+// The laws' values these lines pinned: b1 [10.0, 5.0, 4.0]; b2 [7.5, -1.5, -3.5]; b3 [0.0, 0.0, 0.0]; b4 [0.0, 0.0, 0.0]; b5 [false, false, false]; b6 [0.0, -1.5, -3.5].
+// ============================================================================
+// Borrow round, lane o: the laws of functions/1264 through nesting -- a choice
+// of guards, a guard of a guard, and a guard over an uncomputed map (the stage
+// composes into the kernel BEFORE the guard: a false guard is the stage type's
+// zero, never the stage applied to a zero cell). Pins by hand from the laws.
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let inc = lambda(z: Float64) -> z + 1.0
+let sub = lambda(z: Float64) -> z - 1.5
+let pos = lambda(z: Float64) -> z > 0.0
+let m = method_for(cf) <@> lambda(v) -> v
+let c = m |> compute
+let b1 = inc <$> (guard(false, cf) <|> cf2) |> compute
+let b2 = sub <$> (guard(true, cf) <|> guard(true, cf2)) |> compute
+let b3 = inc <$> guard(true, guard(false, cf)) |> compute
+let b4 = inc <$> guard(false, m) |> compute
+let b5 = pos <$> guard(false, m) |> compute
+let b6 = sub <$> guard(true, guard(true, m)) |> compute

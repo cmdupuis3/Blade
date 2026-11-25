@@ -1,4 +1,6 @@
-// TEST: Block Fold Spine Forced By Capture Writing Seed
+// TEST: Block Fold Spine Forced By Capture Writing Seed (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G235).
 // Gap G235 (a), round 4 wave 9: the loops/780 shape inside a top-level block
 // (a block of main has the module-level deferred protocol): the captured q
 // forces the spine p before the traversal and the fold reads that snapshot
@@ -8,5 +10,4 @@ let p = method_for(x) <@> lambda(v) -> v * 2.0
 let q = method_for(p) <@> lambda(v) -> v + 1.0
 let s = { let z: Float64 = 1.0; reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), { x(0) = 10.0; z }) }
 let w = p(0)
-// EXPECT: s = 22.0
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 10:1

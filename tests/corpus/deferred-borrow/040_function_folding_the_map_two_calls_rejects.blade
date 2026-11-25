@@ -1,0 +1,10 @@
+// TEST: borrow two calls of a function folding the map straddle the write (rejects)
+// The second call's fold follows the write.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+function f() -> Float64 = reduce(g, (+))
+let s0 = f()
+x(0) = 5.0
+let s = f()
+// ERROR: BL4005 @ 7:1

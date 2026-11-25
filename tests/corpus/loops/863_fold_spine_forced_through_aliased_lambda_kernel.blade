@@ -1,4 +1,6 @@
-// TEST: Fold Spine Forced Through Aliased Lambda Kernel
+// TEST: Fold Spine Forced Through Aliased Lambda Kernel (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G235).
 // Gap G235 (a), round 4 wave 9 (Codex diff review round 1): the fold kernel is
 // an ALIAS k2 of a let-bound lambda that captures q, a map of the spine p. The
 // capture forces p before the traversal, so the fold reads its snapshot after
@@ -10,5 +12,4 @@ let k = lambda(a: Float64, b: Float64) -> a + b + Float64(extents(q))
 let k2 = k
 let s = reduce(p, k2, { x(0) = 10.0; Float64(0) })
 let w = p(0)
-// EXPECT: s = 21.0
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 12:1

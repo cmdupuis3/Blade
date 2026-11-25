@@ -1,0 +1,10 @@
+// TEST: borrow a function folding a snapshot taken before the write is accepted
+// `|> compute` detaches: c is fresh storage and borrows nothing.
+type I = Idx<3>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let c = g |> compute
+function f() -> Float64 = reduce(c, (+))
+x(0) = 5.0
+let s = f()
+// EXPECT: s = 12.0

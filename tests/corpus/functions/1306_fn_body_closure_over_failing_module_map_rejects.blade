@@ -1,0 +1,14 @@
+// TEST: A Function-Body Closure Over A Module Map That May Fail Stays Refused (rejects)
+// Gap G279 (borrow round, lane x): q divides, so evaluating it where h is formed (before the
+// interpreter's read inside the call) could move a failure (formalism 10.2): the capture keeps its
+// coded refusal (BL7004) with the `|> compute` steer.
+// REJECT-AT: codegen
+// ERROR-CONTAINS: 'q' is a deferred map (a `let` of a map with no `|> compute`)
+type A = Array<Int64 like Idx<1>>
+let mut backing: A = [2]
+let q = method_for(backing) <@> lambda(e) -> 10 / e
+function f0() -> Int64 = {
+    let h = lambda(i: Int64) -> q(i)
+    h(0)
+}
+let r1 = f0()

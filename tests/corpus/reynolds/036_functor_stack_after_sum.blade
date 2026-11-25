@@ -1,4 +1,8 @@
 // TEST: Stacked Stages Over A reynolds Map Apply To The Sum In Order
+// Lane z (borrow round, 2026-11-24; gap G335, formalism 10.4): a `<$>` stage that moves a zero is refused
+// over an uncomputed choice (BL4022): `sq` is not a stage that keeps non-zero cells non-zero (a tiny
+// value underflows), so `chosen` writes it on each side of the choice; the guard line keeps `sq` (sq(0.0)
+// is 0.0). Value unchanged.
 // ============================================================================
 // R20 (review round 3): `f <$> c` applies f to each value c yields
 // (formalism 10.1), and a reynolds map yields the SYMMETRIZED value
@@ -27,7 +31,7 @@ let held = sq <$> (method_for(a, b) <@> reynolds(k))
 let forced = held |> compute
 let guarded = sq <$> guard(true, method_for(a, b) <@> reynolds(k)) |> compute
 let c = method_for(a, b) <@> reynolds(k)
-let chosen = sq <$> (c <|> c) |> compute
+let chosen = (sq <$> c) <|> (sq <$> c) |> compute
 // EXPECT: two = [[9.0, 16.0], [16.0, 25.0]]
 // EXPECT: staged = [[16.0, 25.0], [25.0, 36.0]]
 // EXPECT: wrapped_stage = [[17.0, 26.0], [26.0, 37.0]]

@@ -76,6 +76,24 @@ let rec staticValueToIR (v: StaticEval.StaticValue) : IRExpr =
 // inference.
 
 /// Environment for typed lowering (simplified - no type inference needed)
+/// THE BORROW's SPLICE PROVENANCE (formalism 10.2; Lowering.judgeBorrows). The
+/// checker folds a NAMED uncomputed map by splicing its RESOLVED producer --
+/// the typed node of the binding's value itself -- into the fold
+/// (TypeCheckInferReduce.tryInferReduceCompute: a single operand, the leaves
+/// of a `<&!>` tree, a join leg), so the lowered fold reads the producer's
+/// operands and never names the binding. Lowering records, for every binding
+/// whose value is a map, the producer node's SOURCE SPAN -> the binder
+/// (Producers, first writer wins), and for every lowered apply whose typed
+/// node carries such a span, the lowered kernel callable -> (its operands'
+/// binders, the binder) (Copies): that lowered apply IS a copy of the named
+/// producer. The borrow judgment reads a deferred apply whose kernel (through
+/// DerivedFuncOrigins, for a monomorphized clone) and operands match an entry
+/// as a USE of that binder, in any position. Shared by every `with` copy of
+/// the env (one table per program).
+type SpliceTable =
+    { Producers: System.Collections.Generic.Dictionary<Blade.Ast.Span, IRId>
+      Copies: System.Collections.Generic.Dictionary<IRId, ResizeArray<IRId list * IRId>> }
+
 type TypedLowerEnv = {
     Variables: Map<string, IRId>
     Functions: Map<string, IRId>
@@ -145,6 +163,8 @@ type TypedLowerEnv = {
     /// lane's `foldReorderLicensed`), and an unseeded fold's seed takes the
     /// strict identity (lowerUnseededSeed).
     InRepro: bool
+    /// The borrow's splice provenance (SpliceTable above), one per program.
+    Splices: SpliceTable
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
@@ -173,7 +193,31 @@ let emptyTypedEnv () : TypedLowerEnv = {
     LetMutBinders = ResizeArray<IRId>()
     LambdaScope = None
     InRepro = false
+    Splices =
+        { Producers = System.Collections.Generic.Dictionary<Blade.Ast.Span, IRId>()
+          Copies = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRId list * IRId>>() }
 }
+
+/// A binding (module, block or body `let`) whose value is a map: its producer
+/// node's span names the binder (SpliceTable). A block-valued initializer is
+/// judged by its result, as the deferred classification is.
+let noteSpliceProducer (env: TypedLowerEnv) (vid: IRId) (value: TypedExpr) =
+    let rec fin (v: TypedExpr) = match v.Kind with TExprBlock (_, Some f) -> fin f | _ -> v
+    let f = fin value
+    match f.Kind with
+    | TExprApply info when not info.IsComposeApply && f.Span.StartLine > 0 && not (env.Splices.Producers.ContainsKey f.Span) ->
+        env.Splices.Producers.[f.Span] <- vid
+    | _ -> ()
+/// A lowered apply whose typed node is a named producer (its own binding's
+/// lowering or a splice of it): kernel callable -> (operand binders, binder).
+let noteSpliceCopy (env: TypedLowerEnv) (texpr: TypedExpr) (kernel: IRExpr) (arrays: IRExpr list) =
+    match env.Splices.Producers.TryGetValue texpr.Span, kernel with
+    | (true, vid), IRVar (kid, _) ->
+        let refs = arrays |> List.fold (fun acc a -> Set.union acc (collectVarRefsIR a)) Set.empty |> Set.toList
+        (match env.Splices.Copies.TryGetValue kid with
+         | true, l -> l.Add((refs, vid))
+         | _ -> env.Splices.Copies.[kid] <- ResizeArray [ (refs, vid) ])
+    | _ -> ()
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
     { env with Variables = Map.add name id env.Variables }
@@ -692,6 +736,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         lowerTypedLambda env info
     
     | TExprLet (name, varId, value, body) ->
+        noteSpliceProducer env varId value
         let v = lowerBoundValue env name value
         let env' = bindTypedVar name varId env
         let b = lowerTypedExpr env' body
@@ -1117,6 +1162,7 @@ and private lowerTypedApply env (texpr: TypedExpr) (info: TypedApplyInfo) : IREx
         IRAppAt (loweredKernel, arrays, info.OutputType, SrcLoc.Of texpr.Span)
     else
     let (arrayTypes, shared) = alignRangeOperandExtents arrays info.ArrayTypes info.SharedIndexTypes
+    noteSpliceCopy env texpr loweredKernel arrays
     IRApplyCombinator {
         Loop = loweredLoop
         Kernel = loweredKernel
@@ -1498,6 +1544,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
             let env' = bindTypedVar binding.Name binding.VarId env
             IRLet (binding.VarId, IRReplayRow (target, row), lowerTypedBlock env' rest finalExpr)
         | TStmtLet binding ->
+            noteSpliceProducer env binding.VarId binding.Value
             let value =
                 match binding.Type with
                 // A let-rec buffer the desugar proved needs no zero fill
@@ -1998,6 +2045,7 @@ let lowerTypedTypeDef (env: TypedLowerEnv) (ttd: TypedTypeDef) : IRTypeDef =
 
 /// Lower a typed binding
 let lowerTypedBinding (env: TypedLowerEnv) (binding: TypedBinding) : IRBinding * TypedLowerEnv =
+    noteSpliceProducer env binding.VarId binding.Value
     let value = lowerBoundValue env binding.Name binding.Value
     let env' = bindTypedVar binding.Name binding.VarId env
     let irBinding = {
@@ -3358,18 +3406,18 @@ let mapModuleExecutablePayloads (body: IRExpr -> IRExpr) (side: IRExpr -> IRExpr
 /// through deferred aliases and chains of such maps, when o is a STORED binding
 /// (not deferred). Anything else keeps the force (a range with a run-time
 /// bound, a projection of a deferred tuple, a block value: staged, G234).
-let resolveDeferredExtentsModule (modul: IRModule) : IRModule =
-    let values = System.Collections.Generic.Dictionary<IRId, IRExpr>()
-    for b in modul.Bindings do values.[b.Id] <- b.Value
-    let deferred = computeDeferredIds modul.Bindings
+// (the extent of a deferred map is static at `dim`: read from its type)
+let deferredExtentStaticAt (e: IRExpr) (dim: int) =
+    match (try stripUnits (typeOf e) with _ -> IRTUnit) with
+    | ArrayElem at when dim >= 0 && dim < at.IndexTypes.Length -> (tryEvalIntIR at.IndexTypes.[dim].Extent).IsSome
+    | _ -> false
+// The STORED operand a deferred elementwise map reads its run-time extent
+// from (the rewrite below; the borrow's R8 reads the same answer).
+let deferredExtentSourceOf (values: System.Collections.Generic.Dictionary<IRId, IRExpr>) (deferred: Set<IRId>) (e0: IRExpr) : IRExpr option =
     let shapeOf (e: IRExpr) =
         match stripUnits (typeOf e) with
         | ArrayElem at -> Some at
         | _ -> None
-    let staticAt (e: IRExpr) (dim: int) =
-        match shapeOf e with
-        | Some at when dim >= 0 && dim < at.IndexTypes.Length -> (tryEvalIntIR at.IndexTypes.[dim].Extent).IsSome
-        | _ -> false
     let sameShape (a: IRExpr) (b: IRExpr) =
         match shapeOf a, shapeOf b with
         | Some x, Some y ->
@@ -3395,11 +3443,16 @@ let resolveDeferredExtentsModule (modul: IRModule) : IRModule =
                  | _ -> None)
              | _ -> None)
         | _ -> None
+    source Set.empty e0
+let resolveDeferredExtentsModule (modul: IRModule) : IRModule =
+    let values = System.Collections.Generic.Dictionary<IRId, IRExpr>()
+    for b in modul.Bindings do values.[b.Id] <- b.Value
+    let deferred = computeDeferredIds modul.Bindings
     let rewrite (e: IRExpr) : IRExpr =
         e |> rewriteTopDown (fun e ->
             match e with
-            | IRExtent ((IRVar _ as a), dim) when not (staticAt a dim) ->
-                ValueSome (match source Set.empty a with
+            | IRExtent ((IRVar _ as a), dim) when not (deferredExtentStaticAt a dim) ->
+                ValueSome (match deferredExtentSourceOf values deferred a with
                            | Some o -> IRExtent (o, dim)
                            | None -> e)
             | _ -> ValueNone)
@@ -5307,16 +5360,41 @@ let private writeRulesDeferredBinders (allBindings: IRBinding list) (allFuncs: I
     acc
 // A refusal's span for a callable: its declaration, else the declaration of
 // the first binding, then the first other callable, that names it.
-let private writeRulesFuncSpan (users: (IRBinding * Set<IRId>) list) (allFuncs: IRCallable list) (f: IRCallable) =
-    let s = IR.declSpanOf f.Name
-    if s <> Blade.Ast.noSpan then s
-    else
-        match users |> List.tryFind (fun (_, refs) -> Set.contains f.Id refs) with
-        | Some (b, _) -> IR.declSpanOf b.Name
-        | None ->
-            match allFuncs |> List.tryFind (fun g -> g.Id <> f.Id && Set.contains f.Id (collectVarRefsIR g.Body)) with
-            | Some g -> IR.declSpanOf g.Name
-            | None -> s
+//
+// Built ONCE per run of the write rules over that run's `users` and
+// `allFuncs` (an index, not a scan per callable: the scan was quadratic in the
+// callables without a declaration of their own -- lambdas, lifted and cloned
+// callables -- about 0.6 s of 09_qg's check, the same on master; not this
+// round's). It answers exactly what the scan answered, for ANY callable:
+//   * the first binding, in `users` order, whose references contain the id;
+//   * else the first callable, in `allFuncs` order, whose body references the
+//     id and whose own id is a different one (the scan's `g.Id <> f.Id`);
+//   * an id neither index holds is one no binding and no other callable names,
+//     where the scan, too, found nothing and answered the (empty) declaration.
+// The callable index walks every body once, and only when some callable
+// without a declaration is not named by a binding (lazily).
+let private writeRulesFuncSpanIndex (users: (IRBinding * Set<IRId>) list) (allFuncs: IRCallable list) : IRCallable -> Blade.Ast.Span =
+    let firstUser = System.Collections.Generic.Dictionary<IRId, IRBinding>()
+    for (b, refs) in users do
+        for id in refs do
+            if not (firstUser.ContainsKey id) then firstUser.[id] <- b
+    let firstNamer =
+        lazy (
+            let d = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+            for g in allFuncs do
+                for id in collectVarRefsIR g.Body do
+                    if id <> g.Id && not (d.ContainsKey id) then d.[id] <- g
+            d)
+    fun (f: IRCallable) ->
+        let s = IR.declSpanOf f.Name
+        if s <> Blade.Ast.noSpan then s
+        else
+            match firstUser.TryGetValue f.Id with
+            | true, b -> IR.declSpanOf b.Name
+            | _ ->
+                match firstNamer.Value.TryGetValue f.Id with
+                | true, g -> IR.declSpanOf g.Name
+                | _ -> s
 // (R12: the expressions types carry are walked too. A store INTO a struct
 // field, `b.r = d(0)`, is NOT recorded as a value `b` may hold: tracking
 // what a field holds apart from the struct that holds it is the staged
@@ -6241,6 +6319,792 @@ let private wjRefuseDeferredWrites (wj: WriteJudgment) =
                     (Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints wj.WriteSite.[id]
                         ($"a write through {what}, a deferred computation: a map is evaluated where it is read and fused into the folds over it (formalism 10.2), so it has no storage of its own to write -- the write would leave its folds, its prints and its aliases disagreeing. Materialize it first: {remedy} (for a writable copy, `let mut c = <it> |> compute`) and write that.")))
 
+// ---- THE BORROW (the user's decision of 2026-11-23; formalism 10.2) ---------
+// Binding an UNCOMPUTED array value (a map, a co-iteration, a guard / choice,
+// a bound application, a deferred tuple of them, their aliases, a value built
+// over another uncomputed value) over storage `x` makes `x` read-only until
+// the LAST USE of that value: a write to `x` while some use may still follow
+// is refused (BL4005, at the write), in every lane, because the three
+// readings of a deferred value -- evaluated at its binding, at each use, once
+// at its first use -- then disagree. `|> compute` detaches (fresh storage).
+//
+// THE JUDGMENT, three tables and one walk:
+//   READS(b)    the binders b's evaluation may read: every name its value
+//               names (scalars too: a whole rebinding changes what a by-name
+//               reading reads), the storage roots of every storage-holding
+//               name (the storage walk swStorageOf: views, aliases, carriers,
+//               rebindings), closed over the callables, the uncomputed values
+//               and the transparent lets (function / loop values, views) it
+//               names -- a kernel's captures and its callees' module reads.
+//   MENTIONS(n) the borrowers a USE of name n may read: n itself when it is a
+//               borrower, closed over the same edges (a callable's body, an
+//               uncomputed value's operands, a view or function value's base;
+//               never through a computed value, a copy, a fold result or a
+//               value tuple's array member, which detach).
+//   EXTW(c)     the binders a CALL of callable c may write beyond its own
+//               locals and parameters: its assignments (a whole `v = e` writes
+//               `v`), its callees' EXTW, the arguments its callees' written
+//               (`mut`) parameters receive, every array a function value it
+//               calls receives plus what that value's candidates write.
+//   THE WALK    each scope in evaluation order (module statements in module
+//               order, then their blocks; each callable body on its own, every
+//               outer borrower live), carrying which live borrowers a write has
+//               dirtied: a WRITE dirties every live borrower whose READS meet
+//               the written binders; a BIND starts a borrower clean; a USE of a
+//               dirty borrower is a hit at the write. `if` / `match` arms join
+//               (either arm counts); a loop body runs twice (a use earlier in
+//               the body follows a write later in it); a call is the use of
+//               what its callee MENTIONS, then the write of its EXTW; a
+//               traversal that runs a kernel per cell (a map evaluated, a fold,
+//               a join, a sort / mask kernel, an applied loop object, a call
+//               handed a callback) is two cells: operands, kernel use, kernel
+//               write, then the operands and the kernel again. Printing is no
+//               use. A form whose evaluation the walk does not model fails
+//               closed: its children are walked in order and a callable it
+//               names is run per cell.
+let private borrowUnknownRoot : IRId = System.Int32.MinValue + 7
+let rec private borrowHoldsArray (t: IRType) =
+    match t with
+    | Tagged inner -> borrowHoldsArray inner
+    | IRTTuple ts -> ts |> List.exists borrowHoldsArray
+    | IRTComputation inner -> borrowHoldsArray inner
+    | t -> writeRulesIsArrayTy t
+let private borrowIsFnType (t: IRType) = match stripUnits t with FuncElem _ -> true | _ -> false
+
+type private BorrowHit =
+    { Borrower: IRId
+      WriteSpan: Blade.Ast.Span
+      Written: Set<IRId>
+      WriteKind: string
+      UseSpan: Blade.Ast.Span }
+
+/// The walk's state: the borrowers bound so far (every one, inside a callable
+/// body) and the dirty ones, with the write that dirtied each.
+type private BorrowState =
+    { AllLive: bool
+      Live: Set<IRId>
+      Dirty: Map<IRId, Blade.Ast.Span * Set<IRId> * string> }
+
+type private BorrowCtx =
+    { Wj: WriteJudgment
+      Borrowers: Set<IRId>
+      Deferred: Set<IRId>
+      Funcs: Map<IRId, IRCallable>
+      Reads: System.Collections.Generic.Dictionary<IRId, Set<IRId>>
+      ReadersOf: System.Collections.Generic.Dictionary<IRId, ResizeArray<IRId>>
+      ReadsAnything: System.Collections.Generic.HashSet<IRId>
+      Mentions: System.Collections.Generic.Dictionary<IRId, Set<IRId>>
+      ExtWrites: System.Collections.Generic.Dictionary<IRId, Set<IRId>>
+      StorageCache: System.Collections.Generic.Dictionary<IRId * IRId, Set<IRId>>
+      Hits: ResizeArray<BorrowHit>
+      HitKeys: System.Collections.Generic.HashSet<IRId * Blade.Ast.Span>
+      /// READS of an inline expression (an uncomputed operand that is no name)
+      ReadsOfExpr: (IRCallable option -> IRExpr -> Set<IRId>) ref
+      /// the splice provenance lowering recorded (SpliceTable), and the
+      /// monomorphized clones' origins (a clone's kernel reads its origin's entry)
+      Splices: SpliceTable
+      Origins: Map<IRId, IRId> }
+
+// The storage a write target / argument may belong to (the shared walk;
+// unknown -> the unknown root, which every borrower reads).
+let private borrowStorageOf (ctx: BorrowCtx) (owner: IRCallable option) (e: IRExpr) : Set<IRId> =
+    let compute () =
+        match swStorageOf ctx.Wj.Walk 48 owner e with
+        | Some s -> s
+        | None -> Set.singleton borrowUnknownRoot
+    match e with
+    | IRVar (id, _) ->
+        let key = ((match owner with Some c -> c.Id | None -> System.Int32.MinValue), id)
+        (match ctx.StorageCache.TryGetValue key with
+         | true, s -> s
+         | _ ->
+             let s = compute ()
+             ctx.StorageCache.[key] <- s
+             s)
+    | _ -> compute ()
+
+// R8 (lead ruling): an EXTENT or RANK read that evaluates nothing is no use --
+// a rank, a static extent (read from the type), and at module level a run-time
+// extent the cell-for-cell rewrite reads from a stored operand
+// (resolveDeferredExtentsModule, the G234 rule). Any other extent read of a
+// deferred map forces it and is a use.
+let private borrowExtentFree (deferred: Set<IRId>) (lets: System.Collections.Generic.Dictionary<IRId, IRExpr>) (owner: IRCallable option) (e: IRExpr) : bool =
+    match e with
+    | IRRank (IRVar (id, _)) -> deferred.Contains id
+    | IRExtent ((IRVar (id, _) as a), dim) when deferred.Contains id ->
+        deferredExtentStaticAt a dim
+        || (owner.IsNone && (try (deferredExtentSourceOf lets deferred a).IsSome with _ -> false))
+    | _ -> false
+// Every node of a root and of the expressions its types carry, top-down,
+// skipping the extent reads that evaluate nothing (R8).
+// (`withExt` false: the root alone, not the expressions its types carry)
+let private borrowVisitWith (withExt: bool) (wj: WriteJudgment) (deferred: Set<IRId>) (owner: IRCallable option) (e: IRExpr) (f: IRExpr -> unit) =
+    for r in (if withExt then wj.WithExtents e else [ e ]) do
+        visitTopDown (fun n ->
+            if borrowExtentFree deferred wj.Walk.Lets owner n then false
+            else
+                f n
+                true) r
+let private borrowVisit (wj: WriteJudgment) (deferred: Set<IRId>) (owner: IRCallable option) (e: IRExpr) (f: IRExpr -> unit) =
+    borrowVisitWith true wj deferred owner e f
+let private borrowRefsWith (wj: WriteJudgment) (deferred: Set<IRId>) (owner: IRCallable option) (e: IRExpr) : Set<IRId> =
+    let acc = System.Collections.Generic.HashSet<IRId>()
+    borrowVisit wj deferred owner e (fun n -> match n with IRVar (id, _) -> acc.Add id |> ignore | _ -> ())
+    Set.ofSeq acc
+
+// The binders a deferred APPLY is a spliced copy of (SpliceTable): its kernel
+// callable (or the origin it was monomorphized from) has an entry whose operand
+// binders are this apply's.
+let private borrowSplicedFrom (ctx: BorrowCtx) (e: IRExpr) : IRId list =
+    match e with
+    | IRApplyCombinator ({ Kernel = IRVar (kid, _) } as info) when ctx.Splices.Copies.Count > 0 ->
+        let rec entriesOf (seen: Set<IRId>) (k: IRId) =
+            match ctx.Splices.Copies.TryGetValue k with
+            | true, l -> List.ofSeq l
+            | _ ->
+                match ctx.Origins.TryFind k with
+                | Some o when not (seen.Contains o) -> entriesOf (seen.Add o) o
+                | _ -> []
+        // (the operands' binders only when the kernel has an entry at all)
+        match entriesOf (Set.singleton kid) kid with
+        | [] -> []
+        | entries ->
+            let refs = info.Arrays |> List.fold (fun acc a -> Set.union acc (collectVarRefsIR a)) Set.empty |> Set.toList
+            entries |> List.filter (fun (r, _) -> r = refs) |> List.map snd |> List.distinct
+    | _ -> []
+// THE TRANSPARENT POSITIONS of a let's value (MENTIONS' edges for a binder that
+// is not itself uncomputed): what a later use of the binder may still read.
+let rec private borrowValueSuccs (w: StorageWalk) (refs: IRExpr -> IRId list) (selfId: IRId option) (e: IRExpr) : IRId list =
+    let allRefs (x: IRExpr) = refs x
+    let isArr (x: IRExpr) = try writeRulesIsArrayTy (typeOf x) with _ -> false
+    let inner (x: IRExpr) = borrowValueSuccs w refs None x
+    match e with
+    | IRVar (src, _) ->
+        (match selfId with
+         | Some id when swIsProvedCopy w id e -> []
+         | _ -> [ src ])
+    | IRCompute _ | IRArrayLit _ -> []
+    | IRLet _ -> inner (snd (IRLift.peelLetChain e))
+    | IRIf (_, t, f) -> inner t @ inner f
+    | IRMatch (_, cases) -> cases |> List.collect (fun c -> inner c.Body)
+    // a value tuple / struct evaluates its array members as copies at its
+    // construction (formalism 10.2): only its function / loop members carry
+    | IRTuple es -> es |> List.filter (fun m -> not (isArr m)) |> List.collect inner
+    | IRStructLit (_, fs) -> fs |> List.map snd |> List.filter (fun m -> not (isArr m)) |> List.collect inner
+    | IRTupleCons (h, t) -> [ h; t ] |> List.filter (fun m -> not (isArr m)) |> List.collect inner
+    | IRIndex (a, _, _) -> if isArr e then inner a else []
+    | IRCurry (a, _, _) | IRSlice (a, _, _, _) | IRSubset (a, _, _, _) | IRShift (a, _, _, _) | IRReverse (a, _)
+    | IRDiag a | IRPolyIndex (a, _) | IRPolyTail (a, _) | IRTupleDecons a | IRPure a | IRTupleProj (a, _, _)
+    | IRFieldAccess (a, _) | IRCompoundProject (a, _) ->
+        inner a
+    | IRMethodFor _ | IRObjectFor _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRReynolds _
+    | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _
+    | IRFallback _ | IRBind _ | IRZip _ | IRGuard _ | IRSequence _ | IRAlign _ | IRArrayProduct _ | IRReplicate _ ->
+        allRefs e
+    // a call returning a function value or a loop object (a closure factory)
+    | IRAppAt (_, _, rt, _) when borrowIsFnType rt || (match stripUnits rt with IRTLoop _ -> true | _ -> false) -> allRefs e
+    // DETACHED (no wildcard: a form added later is an incomplete-match warning
+    // until it is classified): a computed value -- a scalar, a call result (the
+    // callee forces its return, S4), a fold, an eager array operation's fresh
+    // cells (the storage walk's FRESH list) -- or no value at all
+    | IRAppAt _ | IRLit _ | IRParam _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _ | IRExtent _
+    | IRRank _ | IRContains _ | IRProdSum _ | IRReduce _ | IRReduceCompute _ | IRMask _ | IRIntersect _ | IRUnion _
+    | IRUnique _ | IRSort _ | IRStack _ | IRJoin _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _
+    | IRMatmul _ | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRGroupBy _
+    | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _ | IRUngroup _ | IRUngroupGrid _ | IRUngroupRows _
+    | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ | IRSegments _ | IRSegmentsGrid _
+    | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _ | IRUninit _
+    | IRBeginPoolScope _ | IRReleasePools _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent | IRRaggedLookup _
+    | IRCompoundMask _ | IRConstraintCheck _ | IRBreakIf _ | IRReplayRow _ | IRAssign _ | IRForRange _ | IRRange _ -> []
+
+let private borrowMentionsOf (ctx: BorrowCtx) (id: IRId) : Set<IRId> =
+    match ctx.Mentions.TryGetValue id with
+    | true, s -> s
+    | _ -> Set.empty
+// The borrowers a re-read of these expressions may read: their names' MENTIONS
+// and every spliced copy of a named uncomputed value inside them.
+let private borrowRefMentions (ctx: BorrowCtx) (owner: IRCallable option) (xs: IRExpr list) : Set<IRId> =
+    xs |> List.fold (fun acc x ->
+        let viaNames = borrowRefsWith ctx.Wj ctx.Deferred owner x |> Set.fold (fun a id -> Set.union a (borrowMentionsOf ctx id)) acc
+        if ctx.Splices.Copies.Count = 0 then viaNames
+        else
+            let extra = ref viaNames
+            visitTopDown (fun n ->
+                for b in borrowSplicedFrom ctx n do extra.Value <- Set.union extra.Value (borrowMentionsOf ctx b)
+                true) x
+            extra.Value) Set.empty
+let private borrowExtWritesOf (ctx: BorrowCtx) (c: IRCallable) : Set<IRId> =
+    match ctx.ExtWrites.TryGetValue c.Id with
+    | true, s -> s
+    | _ -> Set.empty
+
+// The callables a child of a RUNNING node runs (a kernel): a callable name,
+// a function value (its candidates), or a loop object / composition naming
+// callables.
+let private borrowKernelsOf (ctx: BorrowCtx) (owner: IRCallable option) (e: IRExpr) : IRCallable list =
+    let w = ctx.Wj.Walk
+    let ownParams = writeRulesParamNamesOf owner
+    match e with
+    | IRVar (id, _) when ctx.Funcs.ContainsKey id -> [ ctx.Funcs.[id] ]
+    | IRVar (_, ty) ->
+        (match w.Resolve e with
+         | Some c -> [ c ]
+         | None -> if borrowIsFnType ty then swFnValueCandidates w owner e None else [])
+    | IRParam (nm, _, ty) when ownParams.Contains nm && borrowIsFnType ty -> swFnValueCandidates w owner e None
+    | IRObjectFor _ | IRComposeObj _ | IRCompose _ | IRComposeMeth _ | IRReynolds _ | IRMethodFor _ ->
+        collectVarRefsIR e |> Set.toList |> List.choose (fun id -> Map.tryFind id ctx.Funcs)
+    | _ -> []
+
+// What a kernel's written (`mut`) parameters write among the operands it is
+// applied to (the fixpoint's reading: every operand when they do not line up).
+let private borrowKernelOperandWrites (ctx: BorrowCtx) (owner: IRCallable option) (k: IRCallable) (arrays: IRExpr list) : Set<IRId> =
+    if not (k.Params |> List.exists (fun p -> ctx.Wj.Written.Contains p.VarId)) then Set.empty
+    elif k.Params.Length = arrays.Length then
+        List.zip k.Params arrays
+        |> List.filter (fun (p, a) -> ctx.Wj.Written.Contains p.VarId && ctx.Wj.Walk.HoldsStorage a)
+        |> List.fold (fun acc (_, a) -> Set.union acc (borrowStorageOf ctx owner a)) Set.empty
+    else
+        arrays |> List.filter ctx.Wj.Walk.HoldsStorage
+        |> List.fold (fun acc a -> Set.union acc (borrowStorageOf ctx owner a)) Set.empty
+
+// A CALL's effects: (what it may read -- MENTIONS --, what it may write,
+// whether it runs a callable more than once: an applied loop object, a
+// callback argument).
+let private borrowCallEffects (ctx: BorrowCtx) (owner: IRCallable option) (f: IRExpr) (args: IRExpr list) : Set<IRId> * Set<IRId> * bool =
+    let w = ctx.Wj.Walk
+    let ownParams = writeRulesParamNamesOf owner
+    let ofCallables (cs: IRCallable list) =
+        cs |> List.fold (fun (u, wr) c -> (Set.union u (borrowMentionsOf ctx c.Id), Set.union wr (borrowExtWritesOf ctx c))) (Set.empty, Set.empty)
+    let argStorage (xs: IRExpr list) =
+        xs |> List.filter w.HoldsStorage |> List.fold (fun acc a -> Set.union acc (borrowStorageOf ctx owner a)) Set.empty
+    let (u0, w0, rep0) =
+        match f with
+        | IRObjectFor oi ->
+            let ks = borrowKernelsOf ctx owner oi.Kernel
+            let (u, wr) = ofCallables ks
+            let opw = ks |> List.fold (fun acc k -> Set.union acc (borrowKernelOperandWrites ctx owner k args)) Set.empty
+            (u, Set.union wr opw, true)
+        | _ ->
+            match w.Resolve f with
+            | Some c ->
+                let paramWrites =
+                    List.zip (List.truncate args.Length c.Params) (List.truncate c.Params.Length args)
+                    |> List.filter (fun (p, a) -> ctx.Wj.Written.Contains p.VarId && w.HoldsStorage a)
+                    |> List.fold (fun acc (_, a) -> Set.union acc (borrowStorageOf ctx owner a)) Set.empty
+                (borrowMentionsOf ctx c.Id, Set.union (borrowExtWritesOf ctx c) paramWrites, false)
+            | None ->
+                let unknownCallee =
+                    match f with
+                    | IRVar _ -> true
+                    | IRParam (nm, _, _) -> ownParams.Contains nm
+                    | _ -> true
+                if not unknownCallee then (Set.empty, Set.empty, false)
+                else
+                    // a FUNCTION VALUE: every array it receives may be written,
+                    // and it reads / writes what one of its candidates does
+                    let (u, wr) = ofCallables (swFnValueCandidates w owner f None)
+                    (Set.union u (borrowRefMentions ctx owner [ f ]), Set.union wr (argStorage args), false)
+    // callback arguments: run by the callee, any number of times
+    let cbs = args |> List.collect (borrowKernelsOf ctx owner)
+    if cbs.IsEmpty then (u0, w0, rep0)
+    else
+        let (u, wr) = ofCallables cbs
+        (Set.union u0 u, Set.union w0 wr, true)
+
+let private borrowUse (ctx: BorrowCtx) (s: BorrowState) (ms: Set<IRId>) (useSpan: Blade.Ast.Span) =
+    if not s.Dirty.IsEmpty then
+        for b in ms do
+            match s.Dirty.TryFind b with
+            | Some (wspan, ids, kind) ->
+                if ctx.HitKeys.Add((b, wspan)) then
+                    ctx.Hits.Add { Borrower = b; WriteSpan = wspan; Written = ids; WriteKind = kind; UseSpan = useSpan }
+            | None -> ()
+let private borrowWrite (ctx: BorrowCtx) (s: BorrowState) (ids: Set<IRId>) (span: Blade.Ast.Span) (kind: string) : BorrowState =
+    if ids.IsEmpty then s
+    else
+        let affected =
+            if ids.Contains borrowUnknownRoot then ctx.Borrowers
+            else
+                let acc = System.Collections.Generic.HashSet<IRId>(ctx.ReadsAnything)
+                for id in ids do
+                    match ctx.ReadersOf.TryGetValue id with
+                    | true, l -> for b in l do acc.Add b |> ignore
+                    | _ -> ()
+                Set.ofSeq acc
+        affected |> Set.fold (fun (st: BorrowState) b ->
+            if (st.AllLive || st.Live.Contains b) && not (st.Dirty.ContainsKey b) then
+                let reads = match ctx.Reads.TryGetValue b with | true, r -> r | _ -> Set.empty
+                { st with Dirty = st.Dirty.Add(b, (span, Set.intersect ids reads, kind)) }
+            else st) s
+let private borrowBind (s: BorrowState) (b: IRId) =
+    { s with Live = s.Live.Add b; Dirty = s.Dirty.Remove b }
+let private borrowJoin (a: BorrowState) (b: BorrowState) =
+    { AllLive = a.AllLive || b.AllLive
+      Live = Set.union a.Live b.Live
+      Dirty = b.Dirty |> Map.fold (fun (acc: Map<_, _>) k v -> if acc.ContainsKey k then acc else acc.Add(k, v)) a.Dirty }
+// Two cells of a traversal: kernel use, kernel write, operands again, kernel
+// again (the operands' first read is the caller's walk).
+// (`opUses` is computed only when something is dirty: a use with nothing dirty
+// finds nothing)
+let private borrowCells (ctx: BorrowCtx) (span: Blade.Ast.Span) (s: BorrowState) (uses: Set<IRId>) (writes: Set<IRId>) (opUses: unit -> Set<IRId>) (kind: string) =
+    borrowUse ctx s uses span
+    let s1 = borrowWrite ctx s writes span kind
+    if not s1.Dirty.IsEmpty then borrowUse ctx s1 (opUses ()) span
+    borrowUse ctx s1 uses span
+    borrowWrite ctx s1 writes span kind
+// R4's single-traversal case for an UNNAMED uncomputed operand (an inline map,
+// a join tree): it is read per cell, so a kernel write to what it reads is a
+// write under a used borrower (R9: a traversal directly over STORED cells its
+// kernel writes is in-place code, no borrow).
+let private borrowInlineOperandRoot : IRId = System.Int32.MinValue + 8
+// the "use" a printing value has at the end of the program (R5)
+let private borrowPrintSpan : Blade.Ast.Span = { Blade.Ast.noSpan with StartLine = -1 }
+let private borrowInlineCheck (ctx: BorrowCtx) (owner: IRCallable option) (span: Blade.Ast.Span) (operands: IRExpr list) (writes: Set<IRId>) =
+    if not writes.IsEmpty then
+        for op in operands do
+            if writeRulesIsDeferredForm op then
+                let reads = ctx.ReadsOfExpr.Value owner op
+                let hit =
+                    writes.Contains borrowUnknownRoot || reads.Contains borrowUnknownRoot
+                    || not (Set.intersect reads writes).IsEmpty
+                if hit && ctx.HitKeys.Add((borrowInlineOperandRoot, span)) then
+                    ctx.Hits.Add { Borrower = borrowInlineOperandRoot; WriteSpan = span; Written = Set.intersect reads writes; WriteKind = "traversal"; UseSpan = span }
+
+// Every binder an expression's evaluation may write (unordered): its
+// assignments (a whole `v = e` writes `v`), its calls' writes, and what every
+// callable it names may write when run (fail closed).
+let private borrowWritesIn (ctx: BorrowCtx) (owner: IRCallable option) (e: IRExpr) : Set<IRId> =
+    let acc = ref Set.empty
+    let add (s: Set<IRId>) = acc.Value <- Set.union acc.Value s
+    iterIRExpr (fun n ->
+        match n with
+        | IRAssign (IRVar (id, _), _) -> add (Set.singleton id)
+        | IRAssign (t, _) -> add (borrowStorageOf ctx owner t)
+        | IRAppAt (f, args, _, _) -> let (_, wr, _) = borrowCallEffects ctx owner f args in add wr
+        | IRApplyCombinator info ->
+            for k in borrowKernelsOf ctx owner info.Kernel do add (borrowKernelOperandWrites ctx owner k info.Arrays)
+        | IRVar (id, _) when ctx.Funcs.ContainsKey id -> add (borrowExtWritesOf ctx ctx.Funcs.[id])
+        | _ -> ()) e
+    acc.Value
+
+// THE WALK of one scope, in evaluation order (formalism 10.2).
+let rec private borrowWalk (ctx: BorrowCtx) (owner: IRCallable option) (span: Blade.Ast.Span) (s: BorrowState) (e: IRExpr) : BorrowState =
+    let walk = borrowWalk ctx owner span
+    let walkAll (st: BorrowState) (xs: IRExpr list) = xs |> List.fold walk st
+    // a spliced copy of a named uncomputed value is a use of that name (looked
+    // up only when something is dirty: a use with nothing dirty finds nothing)
+    if not s.Dirty.IsEmpty then
+        for b in borrowSplicedFrom ctx e do borrowUse ctx s (borrowMentionsOf ctx b) span
+    match e with
+    // R8: an extent / rank read that evaluates nothing
+    | IRExtent _ | IRRank _ when borrowExtentFree ctx.Deferred ctx.Wj.Walk.Lets owner e -> s
+    | IRVar (id, ty) ->
+        if ctx.Funcs.ContainsKey id || borrowIsFnType ty then s
+        else
+            borrowUse ctx s (borrowMentionsOf ctx id) span
+            s
+    | IRLet (id, v, b) ->
+        let s1 = if ctx.Deferred.Contains id then borrowWalkDeferredValue ctx owner span s v else walk s v
+        let s2 = if ctx.Borrowers.Contains id then borrowBind s1 id else s1
+        walk s2 b
+    | IRAssign (t, v) ->
+        let s1 = walk s v
+        let s2 = borrowWalkTarget ctx owner span s1 t
+        let (ids, kind) =
+            match t with
+            | IRVar (id, _) -> (Set.singleton id, "rebind")
+            | _ -> (borrowStorageOf ctx owner t, "write")
+        borrowWrite ctx s2 ids span kind
+    | IRIf (c, t, f) ->
+        let s1 = walk s c
+        borrowJoin (walk s1 t) (walk s1 f)
+    | IRMatch (sc, cases) ->
+        let s1 = walk s sc
+        let (sAcc, outs) =
+            cases |> List.fold (fun (acc: BorrowState, outs) cs ->
+                let sg = match cs.Guard with Some g -> walk acc g | None -> acc
+                (borrowJoin acc sg, walk sg cs.Body :: outs)) (s1, [])
+        (match outs with
+         | [] -> sAcc
+         | o :: rest -> rest |> List.fold borrowJoin o)
+    // an anonymous range evaluates its bounds (the expressions its type carries)
+    | IRRange (_, off) -> walkAll s (Optimize.embeddedExtentExprs e @ Option.toList off)
+    // a fold: its operand, its seed, then the cells (formalism 10.2: a seed runs
+    // before the cells are folded)
+    | IRReduce (a, k, init) -> borrowWalkFold ctx owner span s a k (Option.toList init)
+    | IRReduceCompute (a, k, init) -> borrowWalkFold ctx owner span s a k [ init ]
+    | IRForRange (_, lo, hi, body) ->
+        let s1 = walkAll s [ lo; hi ]
+        let s2 = walk s1 body
+        let sameDirty = s2.Dirty.Count = s1.Dirty.Count && (s2.Dirty |> Map.forall (fun k _ -> s1.Dirty.ContainsKey k))
+        let s3 = if sameDirty then s2 else walk s2 body
+        borrowJoin s1 (borrowJoin s2 s3)
+    | IRAppAt (f, args, _, loc) ->
+        let callSpan = if loc.Span.StartLine > 0 then loc.Span else span
+        let s1 = match f with IRVar _ | IRParam _ | IRObjectFor _ -> s | _ -> walk s f
+        let s2 = walkAll s1 args
+        let (uses, writes, repeat) = borrowCallEffects ctx owner f args
+        if repeat then borrowCells ctx callSpan s2 uses writes (fun () -> borrowRefMentions ctx owner args) "call"
+        else
+            borrowUse ctx s2 uses span
+            borrowWrite ctx s2 writes callSpan "call"
+    // loop objects and function values held, not run
+    | IRMethodFor _ | IRObjectFor _ | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRReynolds _ -> s
+    | IRApplyCombinator info ->
+        let operands =
+            (match info.Loop with
+             | IRMethodFor mi -> mi.Arrays
+             | IRObjectFor _ -> []
+             | l -> [ l ]) @ info.Arrays
+        let kernels =
+            borrowKernelsOf ctx owner info.Kernel
+            @ (match info.Loop with IRObjectFor oi -> borrowKernelsOf ctx owner oi.Kernel | _ -> [])
+        let s1 = walkAll s operands
+        let uses = kernels |> List.fold (fun a k -> Set.union a (borrowMentionsOf ctx k.Id)) Set.empty
+        let writes =
+            kernels |> List.fold (fun a k ->
+                Set.union a (Set.union (borrowExtWritesOf ctx k) (borrowKernelOperandWrites ctx owner k info.Arrays))) Set.empty
+        borrowInlineCheck ctx owner span operands writes
+        borrowCells ctx span s1 uses writes (fun () -> borrowRefMentions ctx owner operands) "kernel"
+    | IRComposeApply info ->
+        let kernels =
+            match wjCompositionOfLocal ctx.Wj Set.empty info.Composition with
+            | Some comp -> collectVarRefsIR comp |> Set.toList |> List.choose (fun id -> Map.tryFind id ctx.Funcs)
+            | None -> borrowKernelsOf ctx owner info.Composition
+        let s1 = walkAll s info.InputArrays
+        let uses =
+            kernels |> List.fold (fun a k -> Set.union a (borrowMentionsOf ctx k.Id)) (borrowRefMentions ctx owner [ info.Composition ])
+        let writes =
+            kernels |> List.fold (fun a k -> Set.union a (borrowExtWritesOf ctx k)) Set.empty
+            |> Set.union (match kernels with k0 :: _ -> borrowKernelOperandWrites ctx owner k0 info.InputArrays | [] -> Set.empty)
+        borrowInlineCheck ctx owner span info.InputArrays writes
+        borrowCells ctx span s1 uses writes (fun () -> borrowRefMentions ctx owner info.InputArrays) "kernel"
+    // structural: members evaluated left to right, callables only held
+    | IRTuple _ | IRStructLit _ | IRArrayLit _ | IRTupleCons _ | IRSequence _ -> walkAll s (childrenOf e)
+    // EVERY OTHER FORM (no wildcard: a form added later is an incomplete-match
+    // warning here until it is classified): its children left to right, and a
+    // callable child is a kernel it runs per cell (fail closed). Leaves, scalar
+    // operations, views, eager array operations, wrappers evaluated in place,
+    // effects and markers all read this way.
+    | IRLit _ | IRParam _ | IRExtent _ | IRRank _ | IRIndex _ | IRCurry _ | IRSlice _ | IRSubset _ | IRContains _
+    | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _ | IRRandAt _ | IRTupleProj _ | IRFieldAccess _
+    | IRTupleDecons _ | IRPure _ | IRPolyIndex _ | IRPolyTail _ | IRProdSum _ | IRCompute _ | IRGuard _
+    | IRChoice _ | IRBind _ | IRParallel _ | IRFusion _ | IRFallback _ | IRArrayProduct _ | IRFunctorMap _
+    | IRReplicate _ | IRZip _ | IRAlign _ | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ | IRSort _
+    | IRStack _ | IRJoin _ | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ | IREigh _
+    | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ | IRReverse _ | IRShift _
+    | IRDiag _ | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _ | IRUngroup _ | IRUngroupGrid _
+    | IRUngroupRows _ | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ | IRSegments _
+    | IRSegmentsGrid _ | IRVirtualReverse _ | IRHaloUnhash _ | IRArity _ | IRNth | IRZero _ | IRUnseededSeed _
+    | IRUninit _ | IRBeginPoolScope _ | IRReleasePools _ | IRSparseKeys _ | IROrbitClass _ | IROpaqueExtent
+    | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRConstraintCheck _ | IRBreakIf _
+    | IRReplayRow _ ->
+        let kids = childrenOf e
+        let kernels = kids |> List.collect (borrowKernelsOf ctx owner)
+        if kernels.IsEmpty then walkAll s kids
+        else
+            let others = kids |> List.filter (fun k -> (borrowKernelsOf ctx owner k).IsEmpty)
+            let s1 = walkAll s others
+            let uses = kernels |> List.fold (fun a k -> Set.union a (borrowMentionsOf ctx k.Id)) Set.empty
+            let writes = kernels |> List.fold (fun a k -> Set.union a (borrowExtWritesOf ctx k)) Set.empty
+            borrowInlineCheck ctx owner span others writes
+            borrowCells ctx span s1 uses writes (fun () -> borrowRefMentions ctx owner others) "kernel"
+// A fold: the operand read, the seed, then two cells (a kernel naming no
+// callable -- an operator section -- still re-reads the operand per cell).
+and private borrowWalkFold (ctx: BorrowCtx) (owner: IRCallable option) (span: Blade.Ast.Span) (s: BorrowState) (a: IRExpr) (k: IRExpr) (seeds: IRExpr list) : BorrowState =
+    let s1 = borrowWalk ctx owner span s a
+    let s2 = seeds |> List.fold (borrowWalk ctx owner span) s1
+    let kernels = borrowKernelsOf ctx owner k
+    let uses = kernels |> List.fold (fun acc c -> Set.union acc (borrowMentionsOf ctx c.Id)) Set.empty
+    let writes = kernels |> List.fold (fun acc c -> Set.union acc (borrowExtWritesOf ctx c)) Set.empty
+    // the seed runs before the cells: what it writes, an inline operand read
+    // per cell afterwards reads written (R4: "a kernel, seed or leg")
+    let seedWrites = seeds |> List.fold (fun acc x -> Set.union acc (borrowWritesIn ctx owner x)) Set.empty
+    borrowInlineCheck ctx owner span [ a ] (Set.union writes seedWrites)
+    borrowCells ctx span s2 uses writes (fun () -> borrowRefMentions ctx owner [ a ]) "kernel"
+// An assignment target: its subscripts are evaluated, its base is the write.
+and private borrowWalkTarget (ctx: BorrowCtx) (owner: IRCallable option) (span: Blade.Ast.Span) (s: BorrowState) (t: IRExpr) : BorrowState =
+    let walk = borrowWalk ctx owner span
+    match t with
+    | IRIndex (a, idxs, _) -> idxs |> List.fold walk (borrowWalkTarget ctx owner span s a)
+    | IRCurry (a, i, _) -> walk (borrowWalkTarget ctx owner span s a) i
+    | IRSlice (a, _, lo, hi) -> walk (walk (borrowWalkTarget ctx owner span s a) lo) hi
+    | IRFieldAccess (a, _) | IRTupleProj (a, _, _) -> borrowWalkTarget ctx owner span s a
+    | IRVar _ | IRParam _ -> s
+    | other -> walk s other
+// An uncomputed value at its binding evaluates nothing -- except the lets of
+// a block-valued initializer, which run there (genLetChainBinding).
+and private borrowWalkDeferredValue (ctx: BorrowCtx) (owner: IRCallable option) (span: Blade.Ast.Span) (s: BorrowState) (v: IRExpr) : BorrowState =
+    match v with
+    | IRLet (id, x, b) ->
+        let s1 = if ctx.Deferred.Contains id then borrowWalkDeferredValue ctx owner span s x else borrowWalk ctx owner span s x
+        let s2 = if ctx.Borrowers.Contains id then borrowBind s1 id else s1
+        borrowWalkDeferredValue ctx owner span s2 b
+    | _ -> s
+
+// THE TABLES and the walks (the census, item 1: the hits, nothing refused).
+// (`printing` is computed only when there is something to judge; `bodySpans`
+// is every callable of `allFuncs`, in order, with the span its refusal reports
+// -- the write rules' sites already hold it)
+// (judgeBorrows below is the entry: it decides first whether there is anything
+// to judge, so a program that writes nothing never runs -- nor compiles -- this)
+let private judgeBorrowsTables (part: string -> unit) (splices: SpliceTable) (printing: unit -> Set<IRId>) (wj: WriteJudgment) (modules: IRModule list) (allFuncs: IRCallable list) (bodySpans: (IRCallable * Blade.Ast.Span) list) (deferred: Set<IRId>) : BorrowHit list =
+    let w = wj.Walk
+    let funcs = wj.Funcs
+    let typeOfBinder (id: IRId) =
+        match w.BindingById.TryFind id with
+        | Some b -> Some b.Type
+        | None ->
+            match w.Lets.TryGetValue id with
+            | true, v -> (try Some (typeOf v) with _ -> None)
+            | _ -> None
+    let borrowers = deferred |> Set.filter (fun id -> match typeOfBinder id with Some t -> borrowHoldsArray t | None -> false)
+    part "setup: borrowers"
+    // the callable whose body binds a local let
+    let letOwner = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in allFuncs do
+        for r in wj.WithExtents f.Body do
+            iterIRExpr (fun n -> match n with IRLet (id, _, _) -> letOwner.[id] <- f | _ -> ()) r
+    part "setup: let owners"
+    let ownerOf (id: IRId) = match letOwner.TryGetValue id with | true, f -> Some f | _ -> None
+    let refsOf (owner: IRCallable option) (e: IRExpr) = borrowRefsWith wj deferred owner e
+    let ctx : BorrowCtx =
+        { Wj = wj; Borrowers = borrowers; Deferred = deferred; Funcs = funcs
+          Reads = System.Collections.Generic.Dictionary<IRId, Set<IRId>>()
+          ReadersOf = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRId>>()
+          ReadsAnything = System.Collections.Generic.HashSet<IRId>()
+          Mentions = System.Collections.Generic.Dictionary<IRId, Set<IRId>>()
+          ExtWrites = System.Collections.Generic.Dictionary<IRId, Set<IRId>>()
+          StorageCache = System.Collections.Generic.Dictionary<IRId * IRId, Set<IRId>>()
+          Hits = ResizeArray<BorrowHit>()
+          HitKeys = System.Collections.Generic.HashSet<IRId * Blade.Ast.Span>()
+          ReadsOfExpr = ref (fun _ _ -> Set.empty)
+          Splices = splices
+          Origins = wj.Origins }
+    // ---- MENTIONS: the transparent edges, reversed, from every borrower ----
+    // A spliced copy of a named map inside a value or a body is a reference to
+    // that name (SpliceTable): an edge like the name itself. One visit gathers
+    // both, the names a root reads and the binders of the copies in it.
+    let hasSplices = splices.Copies.Count > 0
+    let refsAndSplices (owner: IRCallable option) (e: IRExpr) =
+        let refs = System.Collections.Generic.HashSet<IRId>()
+        let spliced = System.Collections.Generic.HashSet<IRId>()
+        borrowVisit wj deferred owner e (fun n ->
+            match n with IRVar (id, _) -> refs.Add id |> ignore | _ -> ()
+            if hasSplices then for b in borrowSplicedFrom ctx n do spliced.Add b |> ignore)
+        (Set.ofSeq refs, spliced)
+    let tSucc = System.Collections.Generic.Dictionary<IRId, Set<IRId>>()
+    let splicedInLets = ResizeArray<IRId * System.Collections.Generic.HashSet<IRId>>()
+    for KeyValue (id, v) in w.Lets do
+        let owner = ownerOf id
+        tSucc.[id] <-
+            if deferred.Contains id then
+                let (refs, spliced) = refsAndSplices owner v
+                if spliced.Count > 0 then splicedInLets.Add((id, spliced))
+                refs
+            else borrowValueSuccs w (fun x -> refsOf owner x |> Set.toList) (Some id) v |> Set.ofList
+    part "setup: mentions: lets"
+    for f in allFuncs do
+        let (refs, spliced) = refsAndSplices (Some f) f.Body
+        let s = Set.union refs (f.Captures |> List.map (fun ci -> ci.Id) |> Set.ofList)
+        tSucc.[f.Id] <- if spliced.Count > 0 then Set.union s (Set.ofSeq spliced) else s
+    // (the lets' copies after the bodies, as a separate pass over the lets
+    // added them)
+    for (id, spliced) in splicedInLets do tSucc.[id] <- Set.union tSucc.[id] (Set.ofSeq spliced)
+    part "setup: mentions: bodies and splices"
+    let rev = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRId>>()
+    for KeyValue (n, ss) in tSucc do
+        for m in ss do
+            match rev.TryGetValue m with
+            | true, l -> l.Add n
+            | _ -> rev.[m] <- ResizeArray [ n ]
+    let mentionAcc = System.Collections.Generic.Dictionary<IRId, System.Collections.Generic.HashSet<IRId>>()
+    for b in borrowers do
+        let seen = System.Collections.Generic.HashSet<IRId>([ b ])
+        let queue = System.Collections.Generic.Queue<IRId>([ b ])
+        while queue.Count > 0 do
+            let n = queue.Dequeue()
+            (match mentionAcc.TryGetValue n with
+             | true, s -> s.Add b |> ignore
+             | _ -> mentionAcc.[n] <- System.Collections.Generic.HashSet<IRId>([ b ]))
+            match rev.TryGetValue n with
+            | true, ps -> for p in ps do if seen.Add p then queue.Enqueue p
+            | _ -> ()
+    for KeyValue (n, s) in mentionAcc do ctx.Mentions.[n] <- Set.ofSeq s
+    part "setup: mentions: closure"
+    // ---- READS: direct reads and storage roots, closed over the same edges ----
+    let isNode (id: IRId) = funcs.ContainsKey id || w.Lets.ContainsKey id
+    let isTransparent (id: IRId) =
+        funcs.ContainsKey id || deferred.Contains id
+        || (match tSucc.TryGetValue id with | true, s -> not s.IsEmpty | _ -> false)
+    let directOfExpr (withExt: bool) (self: IRId option) (owner: IRCallable option) (e: IRExpr) =
+        let refs =
+            let r = System.Collections.Generic.HashSet<IRId>()
+            borrowVisitWith withExt wj deferred owner e (fun n -> match n with IRVar (id, _) -> r.Add id |> ignore | _ -> ())
+            Set.ofSeq r
+        let acc = System.Collections.Generic.HashSet<IRId>(refs)
+        borrowVisitWith withExt wj deferred owner e (fun n ->
+            match n with
+            | IRVar (rid, _) when not (funcs.ContainsKey rid) && w.HoldsStorage n ->
+                for x in borrowStorageOf ctx owner n do acc.Add x |> ignore
+            | IRParam _ when w.HoldsStorage n ->
+                for x in borrowStorageOf ctx owner n do acc.Add x |> ignore
+            | _ -> ())
+        let succ = refs |> Set.toList |> List.filter (fun r -> Some r <> self && isNode r && isTransparent r)
+        (Set.ofSeq acc, succ)
+    let directCache = System.Collections.Generic.Dictionary<IRId, Set<IRId> * IRId list>()
+    let direct (id: IRId) =
+        match directCache.TryGetValue id with
+        | true, r -> r
+        | _ ->
+            let res =
+                match Map.tryFind id funcs with
+                | Some f -> directOfExpr true (Some id) (Some f) f.Body
+                | None -> directOfExpr true (Some id) (ownerOf id) w.Lets.[id]
+            directCache.[id] <- res
+            res
+    // the closure from a start (its direct reads, its successors)
+    let closeReads (d0: Set<IRId>) (succ0: IRId list) =
+        let seen = System.Collections.Generic.HashSet<IRId>(succ0)
+        let stack = System.Collections.Generic.Stack<IRId>(succ0)
+        let acc = System.Collections.Generic.HashSet<IRId>(d0)
+        while stack.Count > 0 do
+            let n = stack.Pop()
+            let (d, succ) = direct n
+            for x in d do acc.Add x |> ignore
+            for m in succ do if seen.Add m then stack.Push m
+        Set.ofSeq acc
+    // an INLINE operand's per-cell reads: the extents its types carry (a range
+    // bound) are evaluated once, where the operand is, not per cell
+    ctx.ReadsOfExpr.Value <- (fun owner e -> let (d, succ) = directOfExpr false None owner e in closeReads d succ)
+    for b in borrowers do
+        let (d0, succ0) = direct b
+        let reads = closeReads d0 succ0
+        ctx.Reads.[b] <- reads
+        if reads.Contains borrowUnknownRoot then ctx.ReadsAnything.Add b |> ignore
+        for x in reads do
+            match ctx.ReadersOf.TryGetValue x with
+            | true, l -> l.Add b
+            | _ -> ctx.ReadersOf.[x] <- ResizeArray [ b ]
+    part "setup: reads"
+    // ---- EXTW: what a call of each callable may write, a fixpoint ----
+    let directWrites = System.Collections.Generic.Dictionary<IRId, Set<IRId> * IRCallable list>()
+    for c in allFuncs do
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        let callees = ResizeArray<IRCallable>()
+        let owner = Some c
+        let ownParams = writeRulesParamNamesOf owner
+        let addStorage (a: IRExpr) = for x in borrowStorageOf ctx owner a do acc.Add x |> ignore
+        for r in wj.WithExtents c.Body do
+            iterIRExpr (fun n ->
+                match n with
+                | IRAssign (IRVar (id, _), _) -> acc.Add id |> ignore
+                | IRAssign (t, _) -> addStorage t
+                | IRAppAt (IRObjectFor oi, args, _, _) ->
+                    for k in borrowKernelsOf ctx owner oi.Kernel do
+                        callees.Add k
+                        for x in borrowKernelOperandWrites ctx owner k args do acc.Add x |> ignore
+                | IRAppAt (f, args, _, _) ->
+                    (match w.Resolve f with
+                     | Some g ->
+                         callees.Add g
+                         List.zip (List.truncate args.Length g.Params) (List.truncate g.Params.Length args)
+                         |> List.iter (fun (p, a) -> if wj.Written.Contains p.VarId && w.HoldsStorage a then addStorage a)
+                     | None ->
+                         let unknownCallee =
+                             match f with
+                             | IRVar _ -> true
+                             | IRParam (nm, _, _) -> ownParams.Contains nm
+                             | _ -> true
+                         if unknownCallee then
+                             callees.AddRange(swFnValueCandidates w owner f None)
+                             for a in args do if w.HoldsStorage a then addStorage a)
+                | IRApplyCombinator info ->
+                    for k in borrowKernelsOf ctx owner info.Kernel do
+                        for x in borrowKernelOperandWrites ctx owner k info.Arrays do acc.Add x |> ignore
+                | IRVar (id, _) when funcs.ContainsKey id -> callees.Add funcs.[id]
+                | _ -> ()) r
+        directWrites.[c.Id] <- (Set.ofSeq acc, List.ofSeq callees |> List.distinctBy (fun g -> g.Id))
+    part "setup: callable writes: direct"
+    let mutable changed = true
+    while changed do
+        changed <- false
+        for c in allFuncs do
+            let (d, callees) = directWrites.[c.Id]
+            let all = callees |> List.fold (fun a g -> Set.union a (borrowExtWritesOf ctx g)) d
+            let ext = all |> Set.filter (fun id -> id = borrowUnknownRoot || not (wjOwnedBy wj c id))
+            if ext <> borrowExtWritesOf ctx c then
+                ctx.ExtWrites.[c.Id] <- ext
+                changed <- true
+    part "setup: callable writes: fixpoint"
+    // ---- THE WALKS: module statements in module order, then every body ----
+    let mutable st : BorrowState = { AllLive = false; Live = Set.empty; Dirty = Map.empty }
+    for m in modules do
+        // a compiler-made binding (a destructuring's hidden tuple) records no
+        // span: it takes the span of the next binding that does (the
+        // destructured names, which the same declaration records)
+        let spans = m.Bindings |> List.map (fun b -> IR.declSpanOf b.Name) |> Array.ofList
+        for i in spans.Length - 2 .. -1 .. 0 do
+            if spans[i].StartLine = 0 then spans[i] <- spans[i + 1]
+        for (i, b) in List.indexed m.Bindings do
+            let span = spans[i]
+            st <-
+                if deferred.Contains b.Id then borrowWalkDeferredValue ctx None span st b.Value
+                else borrowWalk ctx None span st b.Value
+            if borrowers.Contains b.Id then st <- borrowBind st b.Id
+    // R5 (the owner, 2026-11-23): PRINTING IS A USE. A top-level uncomputed value
+    // that prints (borrowPrintingClasses: the print rule's module-level forcing
+    // uses, closed over alias classes) is used at the END of the program.
+    part "walk: module"
+    let printed = printing () |> Set.filter borrowers.Contains |> Set.fold (fun acc b -> Set.union acc (borrowMentionsOf ctx b)) Set.empty
+    part "printing classes"
+    borrowUse ctx st printed borrowPrintSpan
+    for (f, fspan) in bodySpans do
+        borrowWalk ctx (Some f) fspan { AllLive = true; Live = Set.empty; Dirty = Map.empty } f.Body |> ignore
+    // (the result is a local, not a call in tail position: a method with loops
+    // and an explicit tail call is compiled fully optimized at its first call,
+    // the most expensive JIT there is, for code that runs once)
+    let hits = List.ofSeq ctx.Hits
+    part "walk: bodies"
+    hits
+let private judgeBorrows (part: string -> unit) (splices: SpliceTable) (printing: unit -> Set<IRId>) (wj: WriteJudgment) (modules: IRModule list) (allFuncs: IRCallable list) (bodySpans: (IRCallable * Blade.Ast.Span) list) (deferred: Set<IRId>) : BorrowHit list =
+    // nothing written and nothing rebound: nothing to judge (a scalar rebinding
+    // writes no storage, so only the rebinding table sees it)
+    if wj.Written.Count = 0 && wj.Walk.Rebinds.Count = 0 then
+        part "nothing written"
+        []
+    else judgeBorrowsTables part splices printing wj modules allFuncs bodySpans deferred
+
+// THE REFUSAL (lead ruling R1): BL4005 at the write, naming the written
+// storage, the borrower and its later use, with both remedies.
+let private borrowRefusal (wj: WriteJudgment) (bindingById: Map<IRId, IRBinding>) (h: BorrowHit) : Blade.Diagnostics.Diagnostic =
+    let named =
+        h.Written |> Set.toList |> List.choose (fun id ->
+            match bindingById.TryFind id with
+            | Some b when not (b.Name.StartsWith "__") -> Some $"`{b.Name}`"
+            | Some _ -> None
+            | None ->
+                match wj.Walk.ParamOwners.TryGetValue id with
+                | true, (c, i) -> Some $"the parameter `{c.Params.[i].Name}`"
+                | _ -> None)
+    let storage =
+        if not named.IsEmpty then String.concat ", " named
+        elif h.Written.Contains borrowUnknownRoot then "storage whose provenance could not be traced (fail closed)"
+        else "an array"
+    let at =
+        if h.UseSpan.StartLine = -1 then " (it prints at the end of the program)"
+        elif h.UseSpan.StartLine > 0 then $" (at {h.UseSpan.StartLine}:{h.UseSpan.StartCol})" else ""
+    let msg =
+        if h.Borrower = borrowInlineOperandRoot then
+            $"a write to {storage} during a traversal whose uncomputed operand reads it: the operand is read cell by cell while the kernel or the seed writes it, so its cells would depend on where each cell is evaluated (the borrow, formalism 10.2). Compute the operand before the traversal (`let c = <operand> |> compute`, a snapshot: a full copy) and traverse `c`, or move the write out of the kernel."
+        else
+            let (what, snapshot) =
+                match bindingById.TryFind h.Borrower with
+                | Some b -> ($"`{b.Name}`", $"`let c = {b.Name} |> compute`")
+                | None -> ("an uncomputed value bound by a `let` inside a block or a function body", "`let c = <it> |> compute` at its `let`")
+            $"a write to {storage} while {what}, an uncomputed value bound over it before the write, is still used after it{at}: binding an uncomputed array value makes the storage it reads read-only until its last use, so that it reads the same at its binding and at each use (the borrow, formalism 10.2). Either re-apply the loop object after the write instead of binding the value once (`let f = object_for(k)`, then `f <@> x` at each use: no extra memory, it reads the current cells), or take a snapshot before the write ({snapshot}: a full copy)."
+    Blade.Diagnostics.mkError "BL4005" Blade.Diagnostics.PhConstraints h.WriteSpan msg
+
 // ---- if values over computed arrays -----------------------------------------
 /// What the rule on `if` values reads, built once per run of the write rules.
 type private IfRuleCtx =
@@ -6692,7 +7556,105 @@ let private refuseUnorderedIfValues (ctx: IfRuleCtx) (modules: IRModule list) (a
             ifRuleCheck ctx (IR.declSpanOf b.Name) false moduleForced b.Value
             moduleForced <- Set.union moduleForced (ifRuleDominatingForces ctx b.Value)
     for f in allFuncs do ifRuleCheck ctx (funcSpan f) true Set.empty f.Body
-let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit =
+// R5's PRINT PREDICATE. Formalism 10.2's print rule: a class prints iff a
+// FORCING USE at module level (a top-level statement or block, or the capture
+// of a top-level kernel) reaches a member. No lane states it statically: each
+// decides it from its own force points while it emits or runs
+// (CodeGen.genPrintStatements over forcedDeferredIdsCell, the interpreter's
+// ForcedDeferred, EmitLlvm.emitPrints over its Forced set, each closed over
+// IRLift.deferredAliasClasses). So the judgment states it FAIL CLOSED: every
+// module-level reference to a deferred binder that is EVALUATED is a forcing
+// use -- a positional read, a capture, an eager operation's operand, a call
+// argument, an operand of a computed map (loops/599), a block alias (577), a
+// bare expression -- EXCEPT the positions 10.2 names as forcing nothing:
+//   * an extent / rank read that evaluates nothing (R8, G218);
+//   * a `g |> compute` copy (loops/581) and a member of a value tuple, which
+//     evaluates a copy (G58-G62) -- g itself is not forced, but the named
+//     uncomputed values g's producer reads are (the closure below);
+//   * the operand of a FUSED fold (it stores nothing; its names are private);
+//   * a reference inside an uncomputed binding's own value (it is evaluated
+//     where that binding is used, whose MENTIONS carry g);
+//   * a fold over g (the checker splices g's producer, so g is not named).
+// Every deferred binder a module-level LAMBDA names (a kernel, transitively its
+// nested lambdas) is forced too (a capture forces at its traversal). Function
+// bodies force privately and print nothing. Closed over the alias classes.
+// It never reads --print / BLADE_PRINT (a run-time selection).
+let private borrowPrintingClasses (ctx: IfRuleCtx) (allBindings: IRBinding list) : Set<IRId> =
+    let isLambda (c: IRCallable) = c.Name.StartsWith "__lambda"
+    let forced = System.Collections.Generic.HashSet<IRId>()
+    let lambdaSeen = System.Collections.Generic.HashSet<IRId>()
+    let rec lambdaReads (c: IRCallable) =
+        if lambdaSeen.Add c.Id then
+            for id in collectVarRefsIR c.Body do
+                if ctx.Deferred.Contains id then forced.Add id |> ignore
+                match Map.tryFind id ctx.Funcs with
+                | Some g when isLambda g -> lambdaReads g
+                | _ -> ()
+    let isDeferredName (e: IRExpr) = match e with IRVar (id, _) -> ctx.Deferred.Contains id | _ -> false
+    // MATERIALIZED without being stored under its own name: a `g |> compute`
+    // copy and a value-tuple member evaluate g's producer, and every lane forces
+    // the NAMED uncomputed values that producer reads under their own names
+    // (operands, legs, captures, a choice's sides, a guard's body, nested to any
+    // depth): see the closure below
+    let materialized = System.Collections.Generic.HashSet<IRId>()
+    let rec visit (n: IRExpr) =
+        match n with
+        | IRCompute (IRVar (id, _)) when ctx.Deferred.Contains id -> materialized.Add id |> ignore
+        | _ when borrowExtentFree ctx.Deferred ctx.Lets None n -> ()
+        | IRTuple es ->
+            for m in es do
+                match m with
+                | IRVar (id, _) when ctx.Deferred.Contains id -> materialized.Add id |> ignore
+                | _ -> visit m
+        | IRVar (id, _) -> if ctx.Deferred.Contains id then forced.Add id |> ignore
+        // a block-local uncomputed let: its value runs where it is used
+        | IRLet (id, _, body) when ctx.Deferred.Contains id -> visit body
+        // a FUSED fold (the checker spliced the named producer): its operand
+        // tree is walked cell by cell and stores nothing -- the names it reads
+        // are private operands, not forced under their own names; its kernel
+        // and seed are ordinary module code
+        | IRReduceCompute (a, k, i) ->
+            visitFused a
+            visit k
+            visit i
+        | _ -> childrenOf n |> List.iter visit
+    and visitFused (n: IRExpr) =
+        match n with
+        | IRVar _ -> ()
+        | _ -> childrenOf n |> List.iter visitFused
+    for b in allBindings do
+        if not (ctx.Deferred.Contains b.Id) then visit b.Value
+        for id in collectVarRefsIR b.Value do
+            match Map.tryFind id ctx.Funcs with
+            | Some c when isLambda c -> lambdaReads c
+            | _ -> ()
+    // THE CLOSURE: a forced or materialized value evaluates its producer, which
+    // forces every named uncomputed value it reads under its own name, and so on
+    // (fail closed: every name its value reads)
+    // (pushed directly: the same stack as a lazy `Seq.append` of the two,
+    // without the generic sequence machinery's first-call cost)
+    let work = System.Collections.Generic.Stack<IRId>(forced)
+    for m in materialized do work.Push m
+    let expanded = System.Collections.Generic.HashSet<IRId>()
+    while work.Count > 0 do
+        let d = work.Pop()
+        if expanded.Add d then
+            match ctx.Lets.TryGetValue d with
+            | true, v ->
+                for r in collectVarRefsIR v do
+                    if ctx.Deferred.Contains r then
+                        forced.Add r |> ignore
+                        work.Push r
+            | _ -> ()
+    // (the result is a local, not a call in tail position: see judgeBorrowsTables)
+    let mutable classes = Set.empty
+    for id in forced do
+        classes <-
+            match ctx.AliasClasses.TryFind id with
+            | Some cls -> cls |> List.fold (fun a m -> Set.add m a) classes
+            | None -> Set.add id classes
+    classes
+let private refuseDeferredWritesAndUnorderedIfs (splices: SpliceTable) (modules: IRModule list) : unit =
     // (BLADE_PHASE_TIMING: the pass's parts, printed at its end)
     let swParts = System.Diagnostics.Stopwatch.StartNew()
     let parts = ResizeArray<string * int64>()
@@ -6718,7 +7680,7 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
           ValueOf = (fun id -> if deferred.Contains id then (match lets.TryGetValue id with | true, v -> Some v | _ -> None) else None)
           TypeOfExpr = (fun e -> try typeOf e with _ -> IRTUnit) }
     let users = allBindings |> List.map (fun b -> (b, collectVarRefsIR b.Value))
-    let funcSpan (f: IRCallable) = writeRulesFuncSpan users allFuncs f
+    let funcSpan = writeRulesFuncSpanIndex users allFuncs
     // ---- the written binders ----------------------------------------------------
     // Every rebinding of a name (`row = m(1)`) is another value it may hold.
     let rebinds = System.Collections.Generic.Dictionary<IRId, ResizeArray<IRExpr>>()
@@ -6829,6 +7791,30 @@ let private refuseDeferredWritesAndUnorderedIfs (modules: IRModule list) : unit 
     match wj.PendingParamRefusal.Value with
     | Some d -> raise (Blade.Diagnostics.BladeDiagnosticException d)
     | None -> ()
+    // THE BORROW (2026-11-23): last, so a program another rule of this pass
+    // refuses keeps that rule's diagnostic; the first hit in evaluation order
+    // (BLADE_PHASE_TIMING: the borrow's own parts, a line of their own)
+    let swBorrow = System.Diagnostics.Stopwatch.StartNew()
+    let borrowParts = ResizeArray<string * int64>()
+    let borrowPart (name: string) = borrowParts.Add((name, swBorrow.ElapsedMilliseconds)); swBorrow.Restart()
+    let printing () = borrowPrintingClasses ifCtx allBindings
+    let bodySpans = sites |> List.choose (fun (sp, o, _) -> o |> Option.map (fun f -> (f, sp)))
+    // (and the JIT time the judgment's first run pays, the most of its cost on
+    // a small program: every thread's, so a background re-JIT counts too)
+    let jit0 = System.Runtime.JitInfo.GetCompilationTime(false)
+    let jitN0 = System.Runtime.JitInfo.GetCompiledMethodCount(false)
+    let borrowHits = judgeBorrows borrowPart splices printing wj modules allFuncs bodySpans deferred
+    if Blade.Toolchain.envFlag "BLADE_PHASE_TIMING" false then
+        let jit = System.Runtime.JitInfo.GetCompilationTime(false) - jit0
+        let jitN = System.Runtime.JitInfo.GetCompiledMethodCount(false) - jitN0
+        eprintfn "[phase] borrow: %s (of which JIT %d ms, %d methods)" (borrowParts |> Seq.map (fun (n, ms) -> sprintf "%s %d ms" n ms) |> String.concat ", ") (int jit.TotalMilliseconds) jitN
+    match borrowHits with
+    | h :: _ as hits ->
+        // a NAMED borrower's hit at the same write reads better than the
+        // inline-operand one (a spliced copy is both)
+        let h = hits |> List.tryFind (fun x -> x.WriteSpan = h.WriteSpan && x.Borrower <> borrowInlineOperandRoot) |> Option.defaultValue h
+        raise (Blade.Diagnostics.BladeDiagnosticException (borrowRefusal wj bindingById h))
+    | [] -> ()
 
 // ---------------------------------------------------------------------------
 // G239: A FORCE AT EACH READ POSITION INSIDE A FUNCTION BODY (round 4 wave 10,
@@ -7416,6 +8402,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // reference-equal for programs with no `import icechunk`. Errors cannot
     // arise on this path: typecheck ran `expand` first and rejected them.
     let rawProgram = rawProgram |> Option.map Blade.ProviderDesugar.desugarOrIdentity
+    Blade.StageZero.refuseZeroMovingStages program   // a stage over an uncomputed guard / choice that could move a zero (G335)
     let env = { emptyTypedEnv() with Builder = builder }
     let mutable currentExports = Map.empty<string, ModuleExport>
     let mutable irModules = []
@@ -7508,6 +8495,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // builder mints exactly the same ids in exactly the same order as before.
     let irModules = IRMono.shapeMonomorphizeModules irModules env.Builder
     let irModules = irModules |> List.map inlineModuleFunctionAliases
+    let irModules = Blade.IRDeferredTupleProj.substituteModules irModules   // G326: `t[k]` of a named wholly-deferred tuple IS its member, before every judgment
     refuseUncountableStorage irModules
     refuseUnorderableSortKeys irModules
     // R11: every call's arguments and every arithmetic operand, at the instance
@@ -7521,7 +8509,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     refuseWritingJoinLegs irModules
     refuseForeignKernelCaptures irModules
     let swRules = System.Diagnostics.Stopwatch.StartNew()
-    refuseDeferredWritesAndUnorderedIfs irModules
+    refuseDeferredWritesAndUnorderedIfs env.Splices irModules
     if Blade.Toolchain.envFlag "BLADE_PHASE_TIMING" false then
         eprintfn "[phase] lower: through the write rules: %d ms (the rules alone: %d ms)" swLower.ElapsedMilliseconds swRules.ElapsedMilliseconds
 

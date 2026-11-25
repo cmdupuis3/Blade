@@ -1,4 +1,7 @@
 // TEST: A Bool Wrapper Distributed Over A Choice Of reynolds Maps Is A Bool Array
+// Lane z (borrow round, 2026-11-24; gap G335, formalism 10.4): a `<$>` stage that moves a zero is refused
+// over an uncomputed choice (BL4022): `positive` maps a negative value to false, so the stage is written
+// on each side of the choice, over each symmetrized reynolds value (the R20 subject, value unchanged).
 // EXPECT: r = [[true, true], [true, true]]
 // ============================================================================
 // R20 (review round 3): a `<$>` / `@>>` stage over a reynolds map applies to
@@ -14,4 +17,4 @@ let b: Array<Float64 like Idx<2>> = [3.0, 4.0]
 let g = lambda(x, y) -> x * y
 let positive = lambda(z: Float64) -> z > 0.0
 let c = method_for(a, b) <@> reynolds(g)
-let r = positive <$> (c <|> c) |> compute
+let r = (positive <$> c) <|> (positive <$> c) |> compute

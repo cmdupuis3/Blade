@@ -1,0 +1,7 @@
+// TEST: borrow an imported module's storage written while its map is still used (rejects)
+// MODULE: H
+// The borrow (formalism 10.2): H.d is an uncomputed map over H.x; Main writes H.x and then
+// reads H.d, a use that follows the write. Refused at the write, in Main.
+module H
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0

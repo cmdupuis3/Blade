@@ -1,0 +1,28 @@
+// TEST: Call Bare Deferred Alias After An Unrelated Write
+// ----------------------------------------------------------------------------
+// The borrow-round twin of tuples/065 (a (rejects) probe since 2026-11-23: its
+// first argument wrote cnt, which the later bare deferred alias reads). Here the
+// first argument bumps `other`, which no uncomputed value reads, so the borrow
+// accepts the program and the ordered call path is still exercised: the root
+// call's bare deferred alias is forced at its own position, after the earlier
+// argument, under its own name (the class seen / seen2 prints), then the
+// explicit compute: r = 1 + 10 + 2 = 13. A must-native fixture of `blade test
+// llvm` (LlvmTests.mustNativeFixtures): a refusal there fails.
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let cnt: Array<Int64 like Row> = [0]
+let mut other: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+let r = h(bump(other), seen2, good |> compute)
+// EXPECT: r = 13
+// EXPECT: other = [1]
+// EXPECT: seen = [10]
+// EXPECT: seen2 = [10]

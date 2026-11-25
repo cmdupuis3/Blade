@@ -1,0 +1,27 @@
+// TEST: Inlined Call Bare Deferred Alias After An Unrelated Write
+// ----------------------------------------------------------------------------
+// The borrow-round twin of tuples/082 (a (rejects) probe since 2026-11-23: its
+// first argument wrote cnt, which the later bare deferred alias reads), on the
+// capturing (inlined) call path: the first argument bumps `other`, which no
+// uncomputed value reads, and the inlined body reads it again. Left to right:
+// the bump, then `seen2` forced at its own position (the class seen / seen2
+// prints [10]), then the compute: r = 1 + 10 + 2 + other(0) = 14. A must-native
+// fixture of `blade test llvm` (LlvmTests.mustNativeFixtures).
+// ----------------------------------------------------------------------------
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let cnt: Array<Int64 like Row> = [0]
+let mut other: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+let h = lambda(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> k + p(0) + q(0) + other(0)
+let r = h(bump(other), seen2, good |> compute)
+// EXPECT: r = 14
+// EXPECT: other = [1]
+// EXPECT: seen = [10]
+// EXPECT: seen2 = [10]

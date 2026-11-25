@@ -1,0 +1,8 @@
+// TEST: borrow a whole reassignment of the borrowed binding (rejects)
+// `x = e` changes what a by-name reading of g reads: it is a write of x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+x = [4.0, 5.0, 6.0]
+let b = g(0)
+// ERROR: BL4005 @ 5:1

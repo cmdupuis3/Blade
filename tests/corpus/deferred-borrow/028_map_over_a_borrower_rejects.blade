@@ -1,0 +1,10 @@
+// TEST: borrow an uncomputed value built over another borrows what it reads (rejects)
+// h is uncomputed over g, which is uncomputed over x: a use of h after the
+// write reads x.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(g) <@> lambda(v) -> v + 1.0
+let a = g(0)
+x(0) = 5.0
+let s = reduce(h, (+))
+// ERROR: BL4005 @ 7:1

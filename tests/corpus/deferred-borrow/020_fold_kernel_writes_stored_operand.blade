@@ -1,0 +1,10 @@
+// TEST: borrow a fold kernel writing the STORED array it folds is in-place code
+// R9: a traversal directly over stored x whose kernel writes x is no borrow
+// matter (in-place algorithms stay imperative): the fold reads x's cells in
+// ascending order and the kernel's writes are ordered side effects.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let mut log: Array<Float64 like Idx<1>> = [0.0]
+let s = reduce(x, lambda(acc, v) -> { log(0) = log(0) + v; acc + v }, 0.0)
+let l0 = log(0)
+// EXPECT: s = 6.0
+// EXPECT: l0 = 6.0

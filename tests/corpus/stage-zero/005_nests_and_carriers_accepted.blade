@@ -1,0 +1,44 @@
+// TEST: A Stage That Meets Every Requirement Of A Nest Of Guards And Choices Is Accepted
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a nest -- a
+// guard of a choice, a choice of guards, a guard of a guard -- takes the
+// CONJUNCTION of the requirements of what it contains: a guard inside asks
+// for the exact zero at the zero, a choice inside for a stage that keeps zero
+// cells zero and non-zero cells non-zero. `dbl` meets both. The operand also
+// reaches its guard / choice through a top-level alias (a choice bound in a
+// FUNCTION BODY under a stage, and a tuple holding a guard, do not compile in
+// the C++ lane on the merged tip -- lane z rows; their refused twins are 115
+// and 118); the leaves of a guarded choice may be stored,
+// computed or an uncomputed map (the subjects of functions/1264 and 1265, whose stages
+// moved a zero and are refused now). The nests beside their computed twins.
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let dbl = lambda(z: Float64) -> z * 2.0
+let ch = cf <|> cf2
+let alias = ch
+let m = method_for(cf) <@> lambda(v) -> v
+let c = m |> compute
+let n1 = dbl <$> guard(true, ch) |> compute
+let n1c = dbl <$> (guard(true, ch) |> compute) |> compute
+let n2 = dbl <$> (guard(false, cf) <|> cf2) |> compute
+let n2c = dbl <$> (guard(false, cf) <|> cf2 |> compute) |> compute
+let n3 = dbl <$> (guard(true, cf) <|> guard(true, cf2)) |> compute
+let n3c = dbl <$> (guard(true, cf) <|> guard(true, cf2) |> compute) |> compute
+let n4 = dbl <$> guard(false, guard(true, ch)) |> compute
+let n5 = dbl <$> alias |> compute
+let n8 = dbl <$> guard(true, c <|> cf2) |> compute
+let n9 = dbl <$> guard(true, m <|> cf2) |> compute
+let n10 = dbl <$> guard(true, guard(true, m)) |> compute
+// EXPECT: n1 = [3.0, 8.0, -4.0]
+// EXPECT: n1c = [3.0, 8.0, -4.0]
+// EXPECT: n2 = [18.0, 8.0, 6.0]
+// EXPECT: n2c = [18.0, 8.0, 6.0]
+// EXPECT: n3 = [3.0, 8.0, -4.0]
+// EXPECT: n3c = [3.0, 8.0, -4.0]
+// EXPECT: n4 = [0.0, 0.0, 0.0]
+// EXPECT: n5 = [3.0, 8.0, -4.0]
+// EXPECT: n8 = [3.0, 8.0, -4.0]
+// EXPECT: n9 = [3.0, 8.0, -4.0]
+// EXPECT: n10 = [3.0, 0.0, -4.0]

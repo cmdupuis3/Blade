@@ -1,4 +1,6 @@
-// TEST: Fold Spine Stored Before The Fold Writing Seed
+// TEST: Fold Spine Stored Before The Fold Writing Seed (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G235).
 // Gap G235 (a), round 4 wave 9 (Codex design review): an earlier statement
 // already forced the spine p (warm), so p is stored when the fold begins; the
 // fold reads the stored p, not a fresh walk over the x the seed writes: 21.0.
@@ -8,6 +10,4 @@ let warm = p(0)
 let q = method_for(p) <@> lambda(v) -> v + 1.0
 let s = reduce(p, lambda(a, b) -> a + b + Float64(extents(q)), { x(0) = 10.0; Float64(0) })
 let w = p(0)
-// EXPECT: warm = 2.0
-// EXPECT: s = 21.0
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 10:1

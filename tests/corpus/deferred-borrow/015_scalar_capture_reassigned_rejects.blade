@@ -1,0 +1,10 @@
+// TEST: borrow a reassigned scalar the kernel captures (rejects)
+// g's kernel reads the scalar s: rebinding s changes g's cells under a
+// by-name reading.
+let x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let mut s: Float64 = 2.0
+let g = method_for(x) <@> lambda(v) -> v * s
+let a = g(0)
+s = 3.0
+let b = g(0)
+// ERROR: BL4005 @ 7:1

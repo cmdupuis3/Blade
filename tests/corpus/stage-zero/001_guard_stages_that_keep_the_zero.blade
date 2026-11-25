@@ -1,0 +1,87 @@
+// TEST: A Stage That Maps The Zero To The Zero Over An Uncomputed Guard Is Accepted
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4). Over an
+// uncomputed guard a stage follows the laws -- where the guard is false the
+// cell is the zero of the STAGE's result -- while over the computed guard it
+// maps the zero cells. The two readings agree exactly when the stage maps the
+// bit-exact zero of its input to the zero of its result, which the compiler
+// evaluates at compile time; such a stage is accepted. Lines pin the
+// uncomputed form beside its computed twin `f <$> (guard(p, c) |> compute)`:
+// they are equal. Forms: a false, a true and a run-time condition, a stored
+// array, a computed array and an uncomputed map as the body, a Bool and an
+// element-type-changing stage, a stage capturing a `let static`, a named
+// function, a lambda that composes two stages, a two-stage stack, a guard of
+// a guard, an Int64 stage, and `object_for(<$>)`. (A NAMED guard of a stored
+// array and an `f >> g` stage do not compile in the C++ lane on the merged
+// tip either -- lane z rows; the refused twins of both are in 101 and 113.)
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let ci: Array<Int64 like I> = [3, 0, -2]
+let static k: Float64 = 3.0
+let dbl = lambda(z: Float64) -> z * 2.0
+let half = lambda(z: Float64) -> z / 2.0
+let pos = lambda(z: Float64) -> z > 0.0
+let toInt = lambda(z: Float64) -> Int64(floor(z))
+let scaled = lambda(z: Float64) -> z * k
+let sq = lambda(z: Float64) -> z * z
+let tri = lambda(z: Int64) -> z * 3
+let both = lambda(z: Float64) -> half(dbl(z))
+function triple(z: Float64) -> Float64 = z * 3.0
+let m = method_for(cf) <@> lambda(v) -> v
+let c = m |> compute
+let flag = cf(0) > 1.0
+let a1 = dbl <$> guard(false, cf) |> compute
+let a1c = dbl <$> (guard(false, cf) |> compute) |> compute
+let a2 = dbl <$> guard(true, cf) |> compute
+let a2c = dbl <$> (guard(true, cf) |> compute) |> compute
+let a3 = pos <$> guard(flag, cf) |> compute
+let a3c = pos <$> (guard(flag, cf) |> compute) |> compute
+let a4 = pos <$> guard(false, c) |> compute
+let a4c = pos <$> (guard(false, c) |> compute) |> compute
+let a5 = toInt <$> guard(false, m) |> compute
+let a5c = toInt <$> (guard(false, m) |> compute) |> compute
+let a6 = toInt <$> guard(true, m) |> compute
+let a7 = scaled <$> guard(false, cf) |> compute
+let a7c = scaled <$> (guard(false, cf) |> compute) |> compute
+let a8 = sq <$> guard(false, c) |> compute
+let a8c = sq <$> (guard(false, c) |> compute) |> compute
+let a9 = tri <$> guard(false, ci) |> compute
+let a9c = tri <$> (guard(false, ci) |> compute) |> compute
+let a10 = tri <$> guard(true, ci) |> compute
+let a11 = triple <$> guard(false, cf) |> compute
+let a11c = triple <$> (guard(false, cf) |> compute) |> compute
+let a12 = both <$> guard(true, cf) |> compute
+let a12c = both <$> (guard(true, cf) |> compute) |> compute
+let a13 = half <$> (dbl <$> guard(false, m)) |> compute
+let a13c = half <$> (dbl <$> (guard(false, m) |> compute)) |> compute
+let a14 = dbl <$> guard(true, guard(false, cf)) |> compute
+let a14c = dbl <$> (guard(true, guard(false, cf)) |> compute) |> compute
+let a15 = object_for(<$>) <@> (dbl, guard(true, c)) |> compute
+// EXPECT: a1 = [0.0, 0.0, 0.0]
+// EXPECT: a1c = [0.0, 0.0, 0.0]
+// EXPECT: a2 = [3.0, 0.0, -4.0]
+// EXPECT: a2c = [3.0, 0.0, -4.0]
+// EXPECT: a3 = [true, false, false]
+// EXPECT: a3c = [true, false, false]
+// EXPECT: a4 = [false, false, false]
+// EXPECT: a4c = [false, false, false]
+// EXPECT: a5 = [0, 0, 0]
+// EXPECT: a5c = [0, 0, 0]
+// EXPECT: a6 = [1, 0, -2]
+// EXPECT: a7 = [0.0, 0.0, 0.0]
+// EXPECT: a7c = [0.0, 0.0, 0.0]
+// EXPECT: a8 = [0.0, 0.0, 0.0]
+// EXPECT: a8c = [0.0, 0.0, 0.0]
+// EXPECT: a9 = [0, 0, 0]
+// EXPECT: a9c = [0, 0, 0]
+// EXPECT: a10 = [9, 0, -6]
+// EXPECT: a11 = [0.0, 0.0, 0.0]
+// EXPECT: a11c = [0.0, 0.0, 0.0]
+// EXPECT: a12 = [1.5, 0.0, -2.0]
+// EXPECT: a12c = [1.5, 0.0, -2.0]
+// EXPECT: a13 = [0.0, 0.0, 0.0]
+// EXPECT: a13c = [0.0, 0.0, 0.0]
+// EXPECT: a14 = [0.0, 0.0, 0.0]
+// EXPECT: a14c = [0.0, 0.0, 0.0]
+// EXPECT: a15 = [3.0, 0.0, -4.0]

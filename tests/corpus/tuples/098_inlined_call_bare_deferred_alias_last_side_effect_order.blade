@@ -1,4 +1,6 @@
-// TEST: Inlined Call Bare Deferred Alias Last Side Effect Order
+// TEST: Inlined Call Bare Deferred Alias Last Side Effect Order (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, the bare deferred alias as the LAST argument of the capturing
 // (inlined) call: forced after the bump and the compute.
@@ -15,7 +17,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
 }
 let h = lambda(k: Int64, q: Array<Int64 like Row>, p: Array<Int64 like Row>) -> k + p(0) + q(0) + cnt(0)
 let r = h(bump(cnt), good |> compute, seen2)
-// EXPECT: r = 15
-// EXPECT: cnt = [1]
-// EXPECT: seen = [11]
-// EXPECT: seen2 = [11]
+// ERROR: BL4005 @ 18:11

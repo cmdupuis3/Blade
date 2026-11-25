@@ -297,6 +297,34 @@ let rec copyStore (s: Store) : Store =
 let copyBladeArray (ba: BladeArray) : BladeArray =
     { ba with Extents = Array.copy ba.Extents; Data = copyStore ba.Data }
 
+// The evaluation reading of an uncomputed array binding (BLADE_INTERP_READING,
+// the borrow oracle's instrument; docs/reference/knob-notes.md).
+
+/// How the interpreter evaluates an uncomputed (deferred) array value bound
+/// to a name.
+type DeferReading =
+    /// The interpreter's own schedule, the compiled lanes' twin (unset knob).
+    | ReadingToday
+    /// Reading A: evaluated where it is bound, and kept.
+    | ReadingAtBinding
+    /// Reading B: evaluated afresh at each use from the current inputs.
+    | ReadingAtUse
+
+/// The reading a raw BLADE_INTERP_READING value selects (`null` = unset);
+/// anything but `binding` / `use` (trimmed, any case) reads as unset.
+let deferReadingOf (raw: string) : DeferReading =
+    match raw with
+    | null -> ReadingToday
+    | s ->
+        match s.Trim().ToLowerInvariant() with
+        | "binding" -> ReadingAtBinding
+        | "use" -> ReadingAtUse
+        | _ -> ReadingToday
+
+/// The reading the knob selects NOW (a function: read per call).
+let deferReadingFromKnob () : DeferReading =
+    deferReadingOf (Blade.Knobs.raw Blade.Knobs.interpReading)
+
 // Interpreter faults and resource limits.
 
 /// A runtime fault raised by the interpreter, carrying the same shape as the

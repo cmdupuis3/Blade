@@ -1,0 +1,15 @@
+// TEST: borrow a fold of the map as an earlier argument than a writing one is accepted
+// R5's twin of 023: seen is only folded, so it never prints, and the fold
+// precedes bump's write.
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function k2(p: Int64, k: Int64) -> Int64 = p + k
+let r = k2(reduce(seen, (+)), bump(cnt))
+// EXPECT: r = 11
+// EXPECT: cnt = [1]

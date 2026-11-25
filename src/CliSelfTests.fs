@@ -93,7 +93,7 @@ let internal suiteClearedKnobs =
       "BLADE_SYRK_TILE"; "BLADE_ANTISYM_TILE"; "BLADE_SIMPLEX_TILE"; "BLADE_ORBIT_FOLD"
       "BLADE_DOMAIN_DIAGONAL"; "BLADE_TILE_TUNE"; "BLADE_FOLD_LANES"; "BLADE_FOLD_ROW_SLOTS"
       "BLADE_ORBIT_SCATTER"; "BLADE_ORBIT_PULL"; "BLADE_JOIN_THREADS"
-      "BLADE_POOL_RETAIN"; "BLADE_OWNED_MOVE"; "BLADE_WORKSPACE_CENSUS"; "BLADE_PRIVATE_SPOOL" ]
+      "BLADE_POOL_RETAIN"; "BLADE_OWNED_MOVE"; "BLADE_WORKSPACE_CENSUS"; "BLADE_PRIVATE_SPOOL"; "BLADE_INTERP_READING" ]
     @ Blade.Optimize.optimizerGates
 
 /// Knobs `blade test` SETS (after the clear above) rather than leaves unset,
@@ -6408,6 +6408,7 @@ let internal runFullSuiteWith (resolveTest: string list -> TestInvocation) opts 
          runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests
          (fun () -> Blade.Tests.KnobsTests.runKnobsSyncTests suiteClearedKnobs suitePinnedKnobs)
          Blade.Tests.IRTraversalTests.runIrTraversalFastTests
+         Blade.Tests.EmitterNameTests.runEmitterNameSyncTests
          runCorpusWiringTestsWith resolveTest] opts
 
 // --- The `blade test` key map as data (K18) ---
@@ -6444,6 +6445,7 @@ let internal testKeyTable : TestKeyRow list =
               let r = runTestCategoryFull "Smoke" tests "./generated_cpp_tests"
               if r.Failed = 0 then 0 else 1) }
       { Keys = [ "ir-traversal"; "irtraversal" ]; Run = Blocks [ Blade.Tests.IRTraversalTests.runIrTraversalTests ] }
+      { Keys = [ "emitter-names"; "emitternames" ]; Run = Blocks [ Blade.Tests.EmitterNameTests.runEmitterNameTests ] }
       // Every tests/corpus directory is consumed by the default suite, the
       // interpreter differential and a `blade test <dir>` key. In-process,
       // no toolchain; also part of the full suite.
@@ -6816,6 +6818,7 @@ let internal resolveTestInvocation (rest: string list) : TestInvocation =
     // single word is the corpus-category fallback.
     | [ key ] when (testKeyRow key).IsSome -> Key (testKeyRow key).Value
     | "knobs" :: kargs -> Knobs kargs
+    | (("borrow-oracle" | "borrow-gen") as bkey) :: bargs -> Key { Keys = [ bkey ]; Run = Exits (fun () -> if bkey = "borrow-gen" then Blade.Tests.BorrowGen.dispatchBorrowGen bargs else Blade.Tests.BorrowOracle.dispatchBorrowOracle bargs) }
     // Only the pages whose repo-relative path contains `page`.
     | [ "docs"; page ] -> DocsPage page
     // The differential lanes that take a LITERAL tests/corpus/<dir> name:

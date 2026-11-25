@@ -1,4 +1,6 @@
-// TEST: Call Bare Deferred Alias Chain Side Effect Order
+// TEST: Call Bare Deferred Alias Chain Side Effect Order (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, an alias chain of length 2 (`seen3 = seen2 = seen`) as the middle
 // argument after a writing one: the whole class is forced at the argument,
@@ -17,8 +19,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
 let seen3 = seen2
 function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
 let r = h(bump(cnt), seen3, good |> compute)
-// EXPECT: r = 14
-// EXPECT: cnt = [1]
-// EXPECT: seen = [11]
-// EXPECT: seen2 = [11]
-// EXPECT: seen3 = [11]
+// ERROR: BL4005 @ 20:11

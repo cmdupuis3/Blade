@@ -1,0 +1,14 @@
+// TEST: borrow the storage handed to a callback (rejects)
+// apply_to hands x to a function value; its effects are unknown, so the call
+// may write x (fail closed) while g, over x, is used after it.
+function poke(a: mut Array<Float64 like Idx<3>>) -> Int64 = {
+    a(0) = 5.0
+    0
+}
+function apply_to(f: (Array<Float64 like Idx<3>>) -> Int64, a: mut Array<Float64 like Idx<3>>) -> Int64 = f(a)
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+let k = apply_to(poke, x)
+let b = g(0)
+// ERROR: BL4005 @ 11:9

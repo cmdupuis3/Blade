@@ -538,6 +538,13 @@ let interpJobs =
         [ v "<n>" "n >= 1 tests prepared ahead"; v "1" "one test at a time (the A/B arm)" ]
         Untouched EnvOnly true
         "How many tests' compiled side the interpreter differential prepares ahead of the test it judges."
+let interpReading =
+    knob "BLADE_INTERP_READING" TestHarness [ Compiler ] "unset: the interpreter's own forcing schedule, unchanged"
+        [ v "binding" "reading A: an uncomputed array binding is evaluated at its binding and kept"
+          v "use" "reading B: it is evaluated afresh at each use from the current inputs, never kept across a write"
+          v "<other>" "reads as unset" ]
+        Cleared EnvOnly true
+        "Test instrument (borrow oracle): which evaluation reading the interpreter gives an uncomputed array binding; set alone, those bindings do not print."
 let netcdfDir =
     knob "NETCDF_DIR" Infrastructure [ Compiler ] "unset: bare -lnetcdf"
         [ v "<dir>" "the NetCDF include / link root" ]
@@ -653,7 +660,7 @@ let all : Knob list =
       orbitActions; joinThreads; march; fpContract; stdlib; printSelection; printForm; printBits
       tileCache; tileCacheVerbose; runRecord; poolRetain; ownedMove; workspaceCensus
       privateSpool; llvm; llvmClang; exeCache; pch; toolchainFile; perfCounters
-      phaseTiming; interpTimeoutMs; interpJobs; netcdfDir; blasFlavor; memberVerbose
+      phaseTiming; interpTimeoutMs; interpJobs; interpReading; netcdfDir; blasFlavor; memberVerbose
       poolEarlyRelease
       blasLink; blasInclude; lapackLink; lapackInclude; msmpiBin; llvmBricks; llvmFacts
       llvmDumpIr; shapeSpecCap; debugShapeSpec; gradDump; memcheckCxx; exeCacheVerbose

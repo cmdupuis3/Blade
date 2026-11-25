@@ -1,0 +1,11 @@
+// TEST: borrow a member of a deferred tuple used after the write (rejects)
+// A tuple ALL of whose members are uncomputed is itself uncomputed: p borrows
+// what its members read, and p[0](1) after the write is a use.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let h = method_for(x) <@> lambda(v) -> v + 1.0
+let p = (g, h)
+let a = h(0)
+x(1) = 7.0
+let b = p[0](1)
+// ERROR: BL4005 @ 8:1

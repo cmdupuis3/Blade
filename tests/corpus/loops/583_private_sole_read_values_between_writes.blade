@@ -1,4 +1,6 @@
-// TEST: Private Sole Read Values Between Writes
+// TEST: Private Sole Read Values Between Writes (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G75).
 // ----------------------------------------------------------------------------
 // Gap G75, the success twin of 582: `at` reads the module deferred map g
 // exactly once, by position, so each call evaluates the whole map privately
@@ -12,6 +14,4 @@ function at(n: Int64) -> Int64 = g(1) + n
 let one = at(1)
 x(1) = 5
 let two = at(1)
-// EXPECT: x = [1, 5]
-// EXPECT: one = 6
-// EXPECT: two = 3
+// ERROR: BL4005 @ 14:1

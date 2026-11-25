@@ -1,0 +1,23 @@
+// TEST: A Fold Over A Projection Of A Named Deferred Tuple Folds Its Member
+// Gap G326 (borrow round, lane x; found by lane o's program generator, seed 1 program 12): a projection
+// of a named wholly-deferred tuple IS its member (formalism 10.2, by substitution), so educe(t2[1], (+))
+// fuses exactly as educe(g2, (+)) does -- through a top-level alias of the tuple, a nested projection
+// and a tuple holding one map twice -- and forces and prints nothing. The C++ lane read
+// std::get<1>(t2) of a tuple nothing declared (BL9002).
+type I = Idx<5>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let mut y: Array<Float64 like I> = [1.0, 1.0, 1.0, 1.0, 1.0]
+let g1 = method_for(x) <@> lambda(v) -> v + y(2)
+let g2 = method_for(x) <@> lambda(v) -> v * 2.0
+let t2 = (g1, g2)
+let ta = t2
+let tn = (t2, g1)
+let tg = (g1, g1)
+let s1 = reduce(t2[1], (+))
+let s2 = reduce(ta[0], (+))
+let s3 = reduce(tn[0][1], (+))
+let s4 = reduce(tg[1], (+))
+// EXPECT: s1 = 30.0
+// EXPECT: s2 = 20.0
+// EXPECT: s3 = 30.0
+// EXPECT: s4 = 20.0

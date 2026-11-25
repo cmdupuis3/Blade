@@ -1,0 +1,12 @@
+// TEST: borrow a call writing a mut parameter bound to the storage (rejects)
+// fill writes its `mut` parameter, here x, which g reads and uses later.
+function fill(a: mut Array<Float64 like Idx<3>>) -> Int64 = {
+    a(0) = 5.0
+    0
+}
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let a = g(0)
+let k = fill(x)
+let b = g(0)
+// ERROR: BL4005 @ 9:9

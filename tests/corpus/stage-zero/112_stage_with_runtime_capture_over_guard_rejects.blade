@@ -1,0 +1,16 @@
+// TEST: A Stage Over A Guard That Captures A Run-Time Value Is Refused (rejects)
+// ERROR: BL4022 @ 15:9
+// ERROR-CONTAINS: cannot be evaluated at the zero at compile time
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// `k` is read from an array at run time, so the stage cannot be evaluated at the zero at compile time;
+// the rule fails closed (no run-time check). With `let static k: Float64 = 1.5` it is accepted
+// (stage-zero/001 a7).
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let k: Float64 = cf(0)
+let scale = lambda(z: Float64) -> z * k
+let r = scale <$> guard(false, cf) |> compute

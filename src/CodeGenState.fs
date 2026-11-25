@@ -124,6 +124,10 @@ type CodeGenContext = {
     /// only genComposeApply reads this, to chase a composed leaf back to its IRObjectFor
     /// (the fix for `(o1 >>@ o2) <@> A` over let-bound objects).
     ObjectLoopBindings: Map<IRId, IRExpr>
+    /// Let-bound compositions (`let nd = neg >> dbl`, lane x3): a `<$>` stage that
+    /// names one is applied as its two stages in order (expandStage), since
+    /// a kernel slot takes a callable, which a composition value is not.
+    StageCompositions: Map<IRId, IRExpr>
     /// Deferred provider reads keyed by binding id (from IRModule.ProviderReads);
     /// genBinding emits the registry-dispatched reader (genReadVar / genReadCompoundVar).
     ProviderReads: Map<IRId, ProviderReadSpec>
@@ -2009,6 +2013,7 @@ let emptyContext () = {
     DeferredComputations = Map.empty
     DeferredAliasOf = Map.empty
     ObjectLoopBindings = Map.empty
+    StageCompositions = Map.empty
     ProviderReads = Map.empty
     ProviderWrites = Map.empty
     StreamedArrays = Map.empty
@@ -2115,7 +2120,12 @@ let private generatedSuffixes =
         "_pool"; "_pos"; "_q"; "_r"; "_row"; "_s"; "_sb"; "_sbc"; "_sbrow"; "_sbt"; "_start"
         "_strict"; "_symm"; "_t"; "_tc"; "_to"; "_total"; "_trail"; "_val"; "_valpool"; "_varid"
         "_vw"; "_w"; "_wbufv"; "_wc"; "_wdst"; "_whi"; "_wlo"; "_wr"; "_ws"; "_wsrc"; "_wst"
-        "_wt"; "_x"; "_z"; "_za"; "_zg"; "_zm"; "_zt" ]
+        "_wt"; "_x"; "_z"; "_za"; "_zg"; "_zm"; "_zt"
+        // lane x3: two the census missed, both declared beside the user's bindings
+        // (a join aggregate's `a_idx_extents`, a provider read's missing-value tally
+        // `a_miss`); the loop-scoped provider locals (`_mq`, `_hs`, `_slo`, `_slen`)
+        // and the replay sweep's `_v` shadow no binding their loops read
+        "_idx_extents"; "_miss" ]
 
 /// Could `suffix` (what follows a binding's name) be one codegen appends?
 let private generatedNameSuffix (suffix: string) : bool =
@@ -2224,6 +2234,11 @@ let indexTypeCppName (name: string) : string =
     let name = Blade.Types.TypeOrigins.cppName name
     if Set.contains name cppReservedWords || Set.contains name cppLibraryGlobals
     then name + "_"
+    // an index type spelled like an emitter name (lane x4): the emitter's local
+    // of that spelling hides the global alias inside its scope. Under `u_` no
+    // emitter name begins. (No program census reaches here: a binding-word
+    // family member counts only with an internal `__` word.)
+    elif Blade.CodeGenEmitterNames.isEmitterName (fun w -> w.StartsWith "__") name then "u_" + name
     else name
 
 let addVarName id name ctx =
@@ -2266,7 +2281,7 @@ let private reservedIn (section: string) (s: string) : bool =
 /// `pow(..)`), and the prefixes of its runtime entry points and scaffolding
 /// (`blade_member_init_i64`, `__blade_t0` of the timing scaffold).
 let private emitterScopeNames = Set.ofList [ "cout"; "endl"; "pow" ]
-let private emitterReservedPrefix (s: string) = s.StartsWith "__blade_" || s.StartsWith "blade_"
+let private emitterReservedPrefix (s: string) = Blade.CodeGenEmitterNames.emitterReservedPrefix s
 
 /// Would a VALUE (a binding, a parameter, a capture) spelled `s` meet a
 /// declaration or a macro of the emitted TU? An object-like macro expands at
@@ -2308,6 +2323,53 @@ let avoidUserSpelled (s: string) : string =
 /// The C++ name of the body-local / temporary for IR id `id`: `__v<id>`, unless
 /// the program spells that.
 let localVarName (id: IRId) : string = avoidUserSpelled $"__v{id}"
+
+/// THE HOLE OF A PREFIX FAMILY (borrow round, lane x3). Where the emitter forms
+/// a name as a fixed PREFIX before a binding's emitted spelling `s` (the flat
+/// sweep's pool pointer `__fp_<s>`, a CUDA device pointer `__blade_d_<s>`, a
+/// range holder `__range<i>_<s>`, a transpose's loop variable `__t<s>_<d>`), the
+/// same prefix also begins names the emitter mints WITHOUT a binding (`__fp_cells`,
+/// `__blade_d_out`, `__range<i>_r<id>`, `__tup_<id>`): `taken` says which spellings
+/// of the hole would meet one of those. The hole is `s` itself, unless its core
+/// (`s` without trailing underscores) is taken: then `s_`. The map is injective
+/// (two spellings with one core are escaped or kept together) and never yields a
+/// taken spelling that ends in a letter or digit, so the family and the fixed names
+/// are disjoint by construction; a program whose bindings take no such spelling
+/// emits what it emitted before.
+let prefixFamilyHole (taken: string -> bool) (s: string) : string =
+    if taken (s.TrimEnd '_') then s + "_" else s
+
+/// A `<$>` stage as the stages it applies, innermost first (lane x3). THE CLASS:
+/// a stage is a callable (a lambda, a named function, an operator section), a
+/// composition `f >> g` (f, then g), or a binding of a composition
+/// (`let nd = neg >> dbl`, StageCompositions), nested to any depth. A kernel
+/// slot takes a callable, which a composition value is not: the composition
+/// is applied as its stages in order, the law `(f >> g) <$> c = g <$> (f <$> c)`.
+/// A binding reached again through its own value (no let table builds one) is
+/// kept whole.
+let expandStage (ctx: CodeGenContext) (w: IRExpr) : IRExpr list =
+    let rec go (seen: Set<IRId>) (w: IRExpr) =
+        match w with
+        | IRCompose (f, g) -> go seen f @ go seen g
+        | IRVar (id, _) when not (seen.Contains id) ->
+            (match Map.tryFind id ctx.StageCompositions with
+             | Some c -> go (seen.Add id) c
+             | None -> [ w ])
+        | _ -> [ w ]
+    go Set.empty w
+
+/// The holder of an apply operand range's run-time bounds for the output spelled
+/// `s`: `__range<i>_<s>` (CodeGenCuda.materializeApplyOperands), never a bare
+/// range binding's holder `__range<i>_r<id>` or its bound names
+/// `__range<i>_r<id>__rb_...` (CodeGenBinding): an output spelled `r<digits>`,
+/// alone or before a `__` suffix, takes the escaped hole.
+let rangeHolderName (i: int) (s: string) : string =
+    let bareRangeWord (w: string) =
+        w.Length > 1 && w[0] = 'r'
+        && (let rest = w.Substring 1
+            let digits = match rest.IndexOf "__" with -1 -> rest | k -> rest.Substring(0, k)
+            digits <> "" && Seq.forall System.Char.IsDigit digits)
+    $"__range{i}_{(prefixFamilyHole bareRangeWord s)}"
 
 /// THE C++ NAME TABLE OF ONE PROGRAM (gap G252), installed per program assembly
 /// (after `resetProgramStateCells`). It returns the module with its CALLABLES
@@ -2354,7 +2416,16 @@ let installCppNameTable (modul: IRModule) : IRModule =
         |> Set.ofSeq
     // a fresh spelling is itself neither taken nor reserved (BLADE_RR_STR moved to
     // BLADE_RR_STR_ met another macro: the diff review, Codex 067cb140)
-    let reservedAny (s: string) = Set.contains s cppReservedWords || callableSpellingReserved true s
+    // THE EMITTER'S OWN NAMES (lane x4, CodeGenEmitterNames): a spelling of the
+    // program that is an OPEN emitter name moves like a reserved one (a user
+    // `__fk` read inside the flat sweep read the sweep's index `__fk`). A word
+    // the emitter puts in a binding-name hole (`__dc<v>_a`) is a spelling of this
+    // program: a module binding, a function, a parameter or a capture (raw or
+    // emitted, every module), or an internal `__` spelling -- the emitted name
+    // of every body local (`__v<id>`), match variable and tuple temporary.
+    let programWord (w: string) = census.Contains w || w.StartsWith "__"
+    let emitterName (s: string) = Blade.CodeGenEmitterNames.isEmitterName programWord s
+    let reservedAny (s: string) = Set.contains s cppReservedWords || callableSpellingReserved true s || emitterName s
     // A spelling under an emitter PREFIX (blade_x, __blade_t0) cannot leave it by
     // lengthening (the diff review, Codex 067cb140 round 4: an endless loop), so it
     // is moved under u_ first; the other reserved sets are finite.
@@ -2364,10 +2435,18 @@ let installCppNameTable (modul: IRModule) : IRModule =
     // lengthening outgrows a finite census, so the loop terminates.
     let suffixTaken (r: string) =
         census |> Set.exists (fun n -> n.StartsWith (r + "_") && generatedNameSuffix (n.Substring r.Length))
+    // A member of an emitter family that ends in a word hole (`__af_<word>`, lane
+    // x4) stays one under every lengthening: it too moves under u_, where no
+    // emitter name begins. Past such members a spelling ending in `_` meets only
+    // finite sets.
     let fresh (s: string) =
         let s = if emitterReservedPrefix s then "u_" + s else s
-        let mutable r = lengthenPast census (s + "_")
-        while reservedAny r || suffixTaken r do r <- lengthenPast census (r + "_")
+        let rec settle (s: string) =
+            let mutable r = lengthenPast census (s + "_")
+            while not (Blade.CodeGenEmitterNames.isWordTailMember r) && (reservedAny r || suffixTaken r) do
+                r <- lengthenPast census (r + "_")
+            if Blade.CodeGenEmitterNames.isWordTailMember r then settle ("u_" + s) else r
+        let r = settle s
         census <- census.Add r
         r
     // CALLABLES.
@@ -2395,14 +2474,14 @@ let installCppNameTable (modul: IRModule) : IRModule =
             // F5: `function a_extents(k: Int64)` beside `let a = [1.0, 2.0]`, BL9002)
             let besideGenerated =
                 bindingSpellings |> Set.exists (fun b -> b <> s && s.StartsWith (b + "_") && generatedNameSuffix (s.Substring b.Length))
-            if callableSpellingReserved adl s || bindingSpellings.Contains s || keptOfGroup.Contains f.Id || besideGenerated then
+            if callableSpellingReserved adl s || emitterName s || bindingSpellings.Contains s || keptOfGroup.Contains f.Id || besideGenerated then
                 callableNames.[f.Id] <- fresh s
     // BINDINGS.
     let renames = System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal)
     for raw in generatedSuffixAtRisk bindingRaws do renames.[raw] <- fresh (baseCppName raw)
     for b in modul.Bindings do
         if not (b.Name.StartsWith "_(") && not (renames.ContainsKey b.Name)
-           && valueSpellingReserved (functionValued b.Type) (baseCppName b.Name) then
+           && (valueSpellingReserved (functionValued b.Type) (baseCppName b.Name) || emitterName (baseCppName b.Name)) then
             renames.[b.Name] <- fresh (baseCppName b.Name)
     let emitted (raw: string) = match renames.TryGetValue raw with | true, t -> t | _ -> baseCppName raw
     for (spelling, raws) in bindingRaws |> List.groupBy emitted do
@@ -2427,14 +2506,14 @@ let installCppNameTable (modul: IRModule) : IRModule =
                 | true, t -> Some t
                 | _ ->
                     let t =
-                        if valueSpellingReserved functionValuedName name then fresh name
+                        if valueSpellingReserved functionValuedName name || emitterName name then fresh name
                         else
                             // a keyword: its `_` spelling, unless the program spells that too
                             let b = baseCppName name
                             if rawSpellings.Contains b || reservedAny b then fresh b else b
                     valueMoves.[name] <- t
                     Some t
-            if Set.contains name cppReservedWords || valueSpellingReserved functionValuedName name then
+            if Set.contains name cppReservedWords || valueSpellingReserved functionValuedName name || emitterName name then
                 (moved ()).Value
             else name
     let mutable anyChanged = false

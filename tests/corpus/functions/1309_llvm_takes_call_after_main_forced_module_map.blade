@@ -1,0 +1,15 @@
+// TEST: A Function Reading A Deferred Module Map Main Already Forced Is Taken By The LLVM Lane
+// Gap G75 (2) (borrow round, lane x): main forces `lazy` (a cell read: it prints) before calling `at`,
+// whose body reads `lazy` privately. The LLVM lane refused that call (the forced snapshot is not
+// published); under the borrow rule no write to `z` can come between the force and the call (a call of a
+// function that reads the map is a use of it), so the private evaluation reads the snapshot's cells and
+// the lane now takes it, as the C++ lane always did.
+type Row = Idx<3>
+let z: Array<Int64 like Row> = [1, 2, 3]
+let lazy = method_for(z) <@> lambda(v) -> v * 10
+function at(n: Int64) -> Int64 = lazy(1) + n
+let w = lazy(0) + lazy(2)
+let one = at(1)
+// EXPECT: w = 40
+// EXPECT: one = 21
+// EXPECT: lazy = [10, 20, 30]

@@ -1,0 +1,17 @@
+// TEST: A Kernel Capturing A Named Deferred Tuple Is Refused In The C++ Lane (rejects)
+// Gap G326 (borrow round, lane x): the kernel's body reads 	2[1](0) through its capture of t2; the
+// substitution leaves a capturing callable's body as written (its capture list is the type checker's),
+// and the C++ lane does not build a capture of a tuple nothing declares: a coded refusal (BL7004) with the
+// steer to bind the member to a let first (it was BL9002). The LLVM lane runs it.
+// REJECT-AT: codegen
+// ERROR-CONTAINS: is read whole by name here
+// WARN-CODEGEN: is read whole by name here
+type I = Idx<5>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let mut y: Array<Float64 like I> = [1.0, 1.0, 1.0, 1.0, 1.0]
+let g1 = method_for(x) <@> lambda(v) -> v + y(2)
+let g2 = method_for(x) <@> lambda(v) -> v * 2.0
+let t2 = (g1, g2)
+let ta = t2
+let tn = (t2, g1)
+let k = method_for(x) <@> lambda(v) -> v + t2[1](0) |> compute

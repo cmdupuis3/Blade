@@ -1,4 +1,6 @@
-// TEST: Block Alias Of Deferred Map Copies Before Write
+// TEST: Block Alias Of Deferred Map Copies Before Write (rejects)
+// BORROW, printing is a use (2026-11-23): now refused at the write (BL4005, formalism 10.2): the map prints, so it
+// is used at the end of the program, after the write. The text below is the schedule it witnessed (gap G60 (c)).
 // ----------------------------------------------------------------------------
 // Gap G60 (c): an assignable alias of a deferred map bound in a TOP-LEVEL
 // BLOCK is a forcing use of its source, the copy made AT the alias
@@ -15,6 +17,4 @@ let r = {
     x(0) = 5
     b(0) + b(1)
 }
-// EXPECT: x = [5, 2]
-// EXPECT: g = [10, 5]
-// EXPECT: r = 15
+// ERROR: BL4005 @ 14:1

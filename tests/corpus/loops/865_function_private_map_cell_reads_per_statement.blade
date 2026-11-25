@@ -1,4 +1,6 @@
-// TEST: Function Private Map Cell Reads Per Statement
+// TEST: Function Private Map Cell Reads Per Statement (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G235, G75).
 // Gap G235 (b), round 4 wave 9 (Codex diff review round 1; pre-existing): a
 // function body forces a deferred module map privately per READING STATEMENT
 // (G75, the C++ re-force). d(1) is read, x is written, then d(0) is read: the
@@ -13,4 +15,4 @@ function f() -> Int64 = {
     a * 100 + b
 }
 let s = f()
-// EXPECT: s = 501
+// ERROR: BL4005 @ 10:1

@@ -1,4 +1,6 @@
-// TEST: Tuple Deferred Alias Read After Write
+// TEST: Tuple Deferred Alias Read After Write (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G304).
 // ----------------------------------------------------------------------------
 // Gap G304, a positional read of a deferred alias in a tuple member after a
 // writing member: the member-ordered tuple reads it at its position (11),
@@ -15,7 +17,4 @@ function bump(c: mut Array<Int64 like Row>) -> Int64 = {
     c(0)
 }
 let t = (bump(cnt), seen2(0))
-// EXPECT: t = (1, 11)
-// EXPECT: cnt = [1]
-// EXPECT: seen = [11]
-// EXPECT: seen2 = [11]
+// ERROR: BL4005 @ 18:10

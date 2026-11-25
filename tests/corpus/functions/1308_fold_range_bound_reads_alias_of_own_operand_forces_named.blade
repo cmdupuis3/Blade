@@ -1,0 +1,14 @@
+// TEST: A Fold Range Bound Reading An Alias Or A Projection Of The Fold's Own Operand Forces It Under Its Name
+// Gap G209 (borrow round, lane x): through a deferred alias (a = p) and a projection of a deferred tuple
+// (b = t[0]) the bound's cell read forces p under its own name, as functions/1063 and 1064 refused (BL7004).
+type I = Idx<2>
+let mut xs: Array<Int64 like I> = [2, 3]
+let p = method_for(xs) <@> lambda(x) -> x * 2
+let a = p
+let t = (p, p)
+let b = t[0]
+let r1 = reduce(method_for(p, 0..a(0)) <@> lambda(x, k) -> x + k, (+), 0, axes = 2)
+let r2 = reduce(method_for(p, 0..b(1)) <@> lambda(x, k) -> x * k, (+), 0, axes = 2)
+// EXPECT: r1 = 52
+// EXPECT: r2 = 150
+// EXPECT: p = [4, 6]

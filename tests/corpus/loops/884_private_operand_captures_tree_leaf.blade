@@ -1,4 +1,6 @@
-// TEST: a tree leaf captured through another leaf's private operand
+// TEST: a tree leaf captured through another leaf's private operand (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G233).
 // Gap G233, round 4 wave 10 (Codex design review: the forcing closure
 // includes captures reached while a PRIVATE operand is evaluated): the leaf q
 // reads the deferred r, whose kernel captures the leaf p. Evaluating r for
@@ -11,7 +13,4 @@ let r = method_for(x) <@> lambda(v) -> v + p(1)
 let q = method_for(r) <@> lambda(v) -> v + 1.0
 let s = reduce(p <&!> q, (+), { x(0) = 10.0; Float64(0) })
 let w = p(0)
-// EXPECT: x = [10.0, 2.0]
-// EXPECT: p = [2.0, 4.0]
-// EXPECT: s = (6.0, 13.0)
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 13:1

@@ -1,0 +1,56 @@
+// TEST: Both Intents Of A Stage Over A Guard Or A Choice Keep An Exact Spelling
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage that
+// moves a zero is refused over an UNCOMPUTED guard or choice (stage-zero/101 on),
+// and each of its two readings is written exactly -- the spellings the BL4022
+// message recommends. Stage INSIDE (the laws' cells): `guard(p, f <$> c)` is
+// the zero of the stage's result where p is false, `(f <$> a) <|> (f <$> b)`
+// tests "first non-zero" on the staged cells. Stage the VALUE (the cells'
+// reading): `let v = g |> compute` then `f <$> v`, or inline
+// `f <$> (g |> compute)`. Each over a stored array, a computed array and an
+// uncomputed map as the body. The witness values of the decision: over
+// cf = [1.5, 0.0, -2.0], cf2 = [9.0, 4.0, 3.0]; `neg` inside a false guard is
+// the zero 0.0, over the computed guard -0.0.
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let inc = lambda(z: Float64) -> z + 1.0
+let pos = lambda(z: Float64) -> z > 0.0
+let neg = lambda(z: Float64) -> -z
+let m = method_for(cf) <@> lambda(v) -> v
+let c = m |> compute
+let vg = guard(false, cf) |> compute
+let vch = cf <|> cf2 |> compute
+let vgm = guard(false, m) |> compute
+let vchc = c <|> cf2 |> compute
+let inside_guard = guard(false, inc <$> cf) |> compute
+let inside_guard_map = guard(false, inc <$> m) |> compute
+let inside_guard_true = guard(true, inc <$> c) |> compute
+let value_guard = inc <$> vg |> compute
+let value_guard_map = inc <$> vgm |> compute
+let value_guard_inline = inc <$> (guard(false, c) |> compute) |> compute
+let inside_choice = (inc <$> cf) <|> (inc <$> cf2) |> compute
+let inside_choice_map = (inc <$> m) <|> (inc <$> cf2) |> compute
+let value_choice = inc <$> vch |> compute
+let value_choice_computed = inc <$> vchc |> compute
+let value_choice_inline = inc <$> (m <|> cf2 |> compute) |> compute
+let pos_inside = (pos <$> cf) <|> (pos <$> cf2) |> compute
+let pos_value = pos <$> vch |> compute
+let neg_inside = guard(false, neg <$> cf) |> compute
+let neg_value = neg <$> vg |> compute
+// EXPECT: inside_guard = [0.0, 0.0, 0.0]
+// EXPECT: inside_guard_map = [0.0, 0.0, 0.0]
+// EXPECT: inside_guard_true = [2.5, 1.0, -1.0]
+// EXPECT: value_guard = [1.0, 1.0, 1.0]
+// EXPECT: value_guard_map = [1.0, 1.0, 1.0]
+// EXPECT: value_guard_inline = [1.0, 1.0, 1.0]
+// EXPECT: inside_choice = [2.5, 1.0, -1.0]
+// EXPECT: inside_choice_map = [2.5, 1.0, -1.0]
+// EXPECT: value_choice = [2.5, 5.0, -1.0]
+// EXPECT: value_choice_computed = [2.5, 5.0, -1.0]
+// EXPECT: value_choice_inline = [2.5, 5.0, -1.0]
+// EXPECT: pos_inside = [true, true, true]
+// EXPECT: pos_value = [true, true, false]
+// EXPECT: neg_inside = [0.0, 0.0, 0.0]
+// EXPECT: neg_value = [-0.0, -0.0, -0.0]

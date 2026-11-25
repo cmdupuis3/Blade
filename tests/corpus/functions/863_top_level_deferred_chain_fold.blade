@@ -8,7 +8,8 @@
 // realized by elementwise fusion): one nest, no pool. Declines keep the pool:
 // a fold kernel that may fail (`s3`, integer `/`), and an inner map NAMED
 // outside the chain (`r5`: `p5(0)` reads -- and forces -- it first, so it is a
-// snapshot when the fold runs; the write to `x5` between must not reach r5).
+// snapshot when the fold runs). BORROW (2026-11-23): the write to `x5` that stood between
+// them is gone -- it is refused (BL4005, formalism 10.2) while p5 is still used.
 // (A third deferred level declines too: `blade test optimize`.)
 // ============================================================================
 type N = Idx<1003>
@@ -23,7 +24,6 @@ let s3 = reduce(qk, lambda(a, b) -> a + b / 1, 7)
 let mut x5 = Float64([1.0, 2.0, 3.0])
 let p5 = method_for(x5) <@> lambda(v) -> v * 2.0
 let first5 = p5(0)
-x5(0) = 10.0
 let q5 = method_for(p5) <@> lambda(v) -> v * v
 let r5 = reduce(q5, lambda(a, b) -> a + b, 0.0)
 // EXPECT: r3 = 225238.0

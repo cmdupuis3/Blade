@@ -1,0 +1,11 @@
+// TEST: borrow a fused fold over a chain of maps stores nothing, then a write is accepted
+// The fold over g5 fuses through g2 (a private operand): no name is stored, nothing prints.
+type I = Idx<3>
+let mut y: Array<Float64 like I> = [2.0, 0.0, 1.0]
+let g2 = method_for(y) <@> lambda(v) -> v + 1.0
+let g5 = method_for(g2) <@> lambda(a) -> a * 3.0
+let s = reduce(g5, (+))
+y(2) = 9.0
+let y2 = y(2)
+// EXPECT: s = 18.0
+// EXPECT: y2 = 9.0

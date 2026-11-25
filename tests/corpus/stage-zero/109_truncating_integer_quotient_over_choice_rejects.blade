@@ -1,0 +1,16 @@
+// TEST: An Integer Quotient By Two Over An Uncomputed Choice Is Refused (rejects)
+// ERROR: BL4022 @ 15:9
+// ERROR-CONTAINS: is not a stage that provably keeps zero cells zero and non-zero cells non-zero
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// The cell that breaks it: 1 / 2 truncates to 0, so the uncomputed choice takes the right side (9 / 2 = 4)
+// where the computed choice kept 1 and staged it to 0. An integer quotient keeps zero cells only by +1 / -1.
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let ci: Array<Int64 like I> = [1, 0, 4]
+let ci2: Array<Int64 like I> = [9, 4, 3]
+let halve = lambda(z: Int64) -> z / 2
+let r = halve <$> (ci <|> ci2) |> compute

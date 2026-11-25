@@ -1,0 +1,80 @@
+// TEST: Widening Casts Odd Integer Products Unit Integer Quotients And Conj Over An Uncomputed Choice Are Accepted
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): the rest of
+// the list of stages that cannot change which cells are zero, each over an
+// uncomputed choice beside its computed twin. Casts that can create no zero
+// and remove none: Int64 -> Float64, Int32 -> Int64, Float32 -> Float64,
+// Float64 -> Complex128, Bool -> Int64 (false -> 0, true -> 1). Integer
+// products by an ODD literal (a bijection modulo 2^64, so wrapping never
+// reaches 0) and quotients by +1 / -1. `conj` over a complex choice (its
+// cells read back through `real` / `imag`: 1.5+1.5i, 4+0i, -2-2i chosen).
+// ============================================================================
+type I = Idx<3>
+let ci: Array<Int64 like I> = [3, 0, -2]
+let ci2: Array<Int64 like I> = [9, 4, 3]
+let cs: Array<Int32 like I> = [3, 0, -2]
+let cs2: Array<Int32 like I> = [9, 4, 3]
+let cg: Array<Float32 like I> = [1.5, 0.0, -2.0]
+let cg2: Array<Float32 like I> = [9.0, 4.0, 3.0]
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let bm: Array<Bool like I> = [true, false, false]
+let bm2: Array<Bool like I> = [false, true, false]
+let toF = lambda(z: Int64) -> Float64(z)
+let toL = lambda(z: Int32) -> Int64(z)
+let up = lambda(z: Float32) -> Float64(z)
+let toC = lambda(z: Float64) -> Complex128(z)
+let count = lambda(b: Bool) -> Int64(b)
+let tri = lambda(z: Int64) -> z * 3
+let ntri = lambda(z: Int64) -> -1 * z
+let unit = lambda(z: Int64) -> z / 1
+let nunit = lambda(z: Int64) -> z / -1
+let cj = lambda(z: Complex128) -> conj(z)
+let re = lambda(z: Complex128) -> real(z)
+let im = lambda(z: Complex128) -> imag(z)
+let ich = ci <|> ci2
+let k1 = method_for(cf) <@> lambda(v) -> complex(v, v)
+let k2 = method_for(cf2) <@> lambda(w) -> complex(w, 0.0)
+let zch = k1 <|> k2
+let s1 = toF <$> ich |> compute
+let s1c = toF <$> (ich |> compute) |> compute
+let s2 = toL <$> (cs <|> cs2) |> compute
+let s2c = toL <$> (cs <|> cs2 |> compute) |> compute
+let s3 = up <$> (cg <|> cg2) |> compute
+let s3c = up <$> (cg <|> cg2 |> compute) |> compute
+let zc = toC <$> (cf <|> cf2) |> compute
+let zcc = toC <$> (cf <|> cf2 |> compute) |> compute
+let s4 = method_for(zc) <@> re |> compute
+let s4c = method_for(zcc) <@> re |> compute
+let s5 = count <$> (bm <|> bm2) |> compute
+let s5c = count <$> (bm <|> bm2 |> compute) |> compute
+let s6 = tri <$> ich |> compute
+let s6c = tri <$> (ich |> compute) |> compute
+let s7 = ntri <$> ich |> compute
+let s8 = unit <$> ich |> compute
+let s9 = nunit <$> ich |> compute
+let s9c = nunit <$> (ich |> compute) |> compute
+let cz = cj <$> zch |> compute
+let czc = cj <$> (zch |> compute) |> compute
+let s10 = method_for(cz) <@> re |> compute
+let s11 = method_for(cz) <@> im |> compute
+let s11c = method_for(czc) <@> im |> compute
+// EXPECT: s1 = [3.0, 4.0, -2.0]
+// EXPECT: s1c = [3.0, 4.0, -2.0]
+// EXPECT: s2 = [3, 4, -2]
+// EXPECT: s2c = [3, 4, -2]
+// EXPECT: s3 = [1.5, 4.0, -2.0]
+// EXPECT: s3c = [1.5, 4.0, -2.0]
+// EXPECT: s4 = [1.5, 4.0, -2.0]
+// EXPECT: s4c = [1.5, 4.0, -2.0]
+// EXPECT: s5 = [1, 1, 0]
+// EXPECT: s5c = [1, 1, 0]
+// EXPECT: s6 = [9, 12, -6]
+// EXPECT: s6c = [9, 12, -6]
+// EXPECT: s7 = [-3, -4, 2]
+// EXPECT: s8 = [3, 4, -2]
+// EXPECT: s9 = [-3, -4, 2]
+// EXPECT: s9c = [-3, -4, 2]
+// EXPECT: s10 = [1.5, 4.0, -2.0]
+// EXPECT: s11 = [-1.5, -0.0, 2.0]
+// EXPECT: s11c = [-1.5, -0.0, 2.0]

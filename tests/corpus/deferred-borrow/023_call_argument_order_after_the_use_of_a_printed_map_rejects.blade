@@ -1,0 +1,16 @@
+// TEST: borrow a writing argument after a bare argument whose map prints (rejects)
+// The twin of 022 with the arguments swapped: seen is evaluated (copied into
+// the call) before bump writes cnt, but a bare call argument is a forcing use
+// at module level, so seen prints at the end of the program (R5), after the
+// write. (The accepted twin, seen only folded, is 049.)
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(p: Array<Int64 like Row>, k: Int64) -> Int64 = k + p(0)
+let r = h(seen, bump(cnt))
+// ERROR: BL4005 @ 14:17

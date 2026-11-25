@@ -1,4 +1,6 @@
-// TEST: Function Private Capture Per Reading Statement
+// TEST: Function Private Capture Per Reading Statement (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G235, G75).
 // Gap G235 (b), round 4 wave 9 (Codex diff review round 1): inside a function
 // body a deferred module map is evaluated privately per READING STATEMENT
 // (G75; the C++ lane re-forces it per statement). The first fold captures d
@@ -14,4 +16,4 @@ function f() -> Int64 = {
     a * 100 + b
 }
 let s = f()
-// EXPECT: s = 1518
+// ERROR: BL4005 @ 11:1

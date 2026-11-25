@@ -1,4 +1,6 @@
-// TEST: Nested Sole Read Deferred Map Input Written
+// TEST: Nested Sole Read Deferred Map Input Written (rejects)
+// BORROW, printing is a use (2026-11-23): now refused at the write (BL4005, formalism 10.2): the map prints, so it
+// is used at the end of the program, after the write. The text below is the schedule it witnessed (gap G60 (b)).
 // ----------------------------------------------------------------------------
 // Gap G60 (b), nested: `g` is read exactly once, by the KERNEL of another
 // deferred map `h`, and `h` is forced by the positional read `s = h(1)`.
@@ -13,7 +15,4 @@ let g = method_for(x) <@> lambda(v) -> 10 / v
 let h = method_for(range<Row>) <@> lambda(i) -> g(0) + Int64(i)
 let s = h(1)
 x(0) = 0
-// EXPECT: x = [0, 2]
-// EXPECT: g = [10, 5]
-// EXPECT: h = [10, 11]
-// EXPECT: s = 11
+// ERROR: BL4005 @ 16:1

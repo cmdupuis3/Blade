@@ -1,0 +1,14 @@
+// TEST: borrow the same operand order as a function body's return (rejects)
+// The body's returned expression writes cnt in its left operand and uses seen in its right one.
+type I = Idx<1>
+let mut cnt: Array<Int64 like I> = [10]
+let mut other: Array<Int64 like I> = [5]
+function bump(c: mut Array<Int64 like I>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h1(a: Array<Int64 like I>) -> Int64 = a(0)
+let seen = method_for(cnt) <@> lambda(v) -> v
+function run() -> Int64 = bump(cnt) + h1(seen |> compute)
+let r = run()
+// ERROR: BL4005 @ 11:27

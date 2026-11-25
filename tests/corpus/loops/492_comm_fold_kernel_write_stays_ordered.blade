@@ -1,4 +1,6 @@
-// TEST: Comm Fold Kernel Write Stays Ordered
+// TEST: Comm Fold Kernel Write Stays Ordered (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G41).
 // Gap G41. A `comm` fold kernel that WRITES a captured `let mut` is legal
 // (formalism 5.2: a serial body's write is an ordered side effect; the BL4005
 // ban covers PARALLEL bodies only, and a `comm` kernel is not one). Its
@@ -18,6 +20,4 @@ let mut G: Array<Float64 like K> = method_for(range<K>) <@> lambda(k) -> 0.0 |> 
 let total = reduce(method_for(range<I>) <@> lambda(i) where omp(i: 1) -> reduce(method_for(range<I>) <@> lambda(j) -> G((0 : K)) + Float64(i), (+)),
                    lambda(a, b) where comm(a, b) -> { G((0 : K)) = G((0 : K)) + 1.0; a + b }, 0.0)
 let g0 = G((0 : K))
-// EXPECT: total = 141149320.0
-// EXPECT: g0 = 521.0
-// EXPECT: G = [521.0, 0.0]
+// ERROR: BL4005 @ 19:1

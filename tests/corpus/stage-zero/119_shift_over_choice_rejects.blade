@@ -1,0 +1,14 @@
+// TEST: A Shift That Maps A Non-Zero Cell To Zero Over An Uncomputed Choice Is Refused (rejects)
+// ERROR: BL4022 @ 13:9
+// ERROR-CONTAINS: is not a stage that provably keeps zero cells zero and non-zero cells non-zero
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// shift(1.5) = 0.0: the uncomputed choice falls through to shift(9.0) = 7.5 in the first cell
+// ([7.5, -1.5, -3.5]); the computed choice keeps 1.5 and stages it to 0.0 ([0.0, 2.5, -3.5]).
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let shift = lambda(z: Float64) -> z - 1.5
+let r = shift <$> (cf <|> cf2) |> compute

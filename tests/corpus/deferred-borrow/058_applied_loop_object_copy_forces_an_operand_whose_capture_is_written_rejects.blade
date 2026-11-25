@@ -1,0 +1,13 @@
+// TEST: borrow a compute copy of an applied loop object forces its named operand, whose capture is written (rejects)
+// Materializing g4 = o3 <@> g1 forces g1 under its own name, so g1 prints at the end of the program; the write
+// is to x, which g1's KERNEL captures (not its operand).
+type I = Idx<5>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let y: Array<Float64 like I> = [2.0, 0.0, 1.0, 3.0, 1.0]
+let g1 = method_for(y) <@> lambda(v) -> v + x(1)
+let s2 = reduce(g1, (+))
+let o3 = object_for(lambda(v: Float64) -> v + 3.0)
+let g4 = o3 <@> g1
+let c5 = g4 |> compute
+x(1) = s2 + 2.0
+// ERROR: BL4005 @ 11:1

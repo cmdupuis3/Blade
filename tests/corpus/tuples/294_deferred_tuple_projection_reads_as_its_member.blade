@@ -1,0 +1,28 @@
+// TEST: Reads Through A Projection Of A Named Deferred Tuple Are Reads Of Its Member
+// Gap G326 (borrow round, lane x): the use of 	2[k] IS that use of the member -- a cell read forces the
+// member under its own name (it prints), a call argument forces it, a map operand of a computed map forces
+// it, a zip leg forces it, a static extent reads nothing -- in every lane alike (they all read the member
+// the front end substituted). Each was BL9002 in the C++ lane.
+type I = Idx<5>
+let mut x: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let mut y: Array<Float64 like I> = [1.0, 1.0, 1.0, 1.0, 1.0]
+let g1 = method_for(x) <@> lambda(v) -> v + y(2)
+let g2 = method_for(x) <@> lambda(v) -> v * 2.0
+let t2 = (g1, g2)
+let ta = t2
+let tn = (t2, g1)
+function sum1(a: Array<Float64 like I>) -> Float64 = reduce(a, (+))
+let r1 = t2[1](2)
+let r2 = t2[1](2) + 1.0
+let c = sum1(t2[1])
+let m = method_for(t2[0]) <@> lambda(v) -> v * 3.0 |> compute
+let z = method_for(zip(t2[0], ta[1])) <@> lambda(a, b) -> a + b |> compute
+let n = extents(tn[0][1])
+// EXPECT: r1 = 6.0
+// EXPECT: r2 = 7.0
+// EXPECT: c = 30.0
+// EXPECT: m = [6.0, 9.0, 12.0, 15.0, 18.0]
+// EXPECT: z = [4.0, 7.0, 10.0, 13.0, 16.0]
+// EXPECT: n = 5
+// EXPECT: g1 = [2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: g2 = [2.0, 4.0, 6.0, 8.0, 10.0]

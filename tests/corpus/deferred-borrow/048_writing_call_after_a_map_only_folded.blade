@@ -1,0 +1,13 @@
+// TEST: borrow a writing call after the last fold of a map that never prints is accepted
+// R5's twin of 012.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+function bump() -> Int64 = {
+    x(0) = x(0) + 1.0
+    0
+}
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(g, (+))
+let k = bump()
+let x0 = x(0)
+// EXPECT: s = 12.0
+// EXPECT: x0 = 2.0

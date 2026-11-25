@@ -1,0 +1,7 @@
+// TEST: borrow a fold seed that writes the folded map's input (rejects)
+// The seed runs before the cells are folded (formalism 10.2), so its write
+// precedes every read of p in this fold.
+let mut x: Array<Float64 like Idx<2>> = [1.0, 2.0]
+let p = method_for(x) <@> lambda(v) -> v * 2.0
+let s = reduce(p, (+), { x(0) = x(0) + 1.0; Float64(0) })
+// ERROR: BL4005 @ 5:1

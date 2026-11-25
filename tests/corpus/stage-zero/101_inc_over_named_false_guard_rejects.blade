@@ -1,0 +1,16 @@
+// TEST: A Stage That Maps The Zero To One Over A Named Uncomputed Guard Is Refused (rejects)
+// ERROR: BL4022 @ 15:9
+// ERROR-CONTAINS: not to the zero of its result
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// inc(0.0) = 1.0: over the uncomputed guard the cells where it is false are the zero of the
+// result (the laws: [0.0, 0.0, 0.0]), over the computed guard they are inc(0.0) ([1.0, 1.0, 1.0]).
+// Spell one: `guard(false, inc <$> cf)` or `inc <$> (g |> compute)` (stage-zero/004).
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let inc = lambda(z: Float64) -> z + 1.0
+let g = guard(false, cf)
+let r = inc <$> g |> compute

@@ -1,4 +1,5 @@
 // TEST: Compute Of A Map Forces Its Deferred Operands So They Print
+// BORROW, printing is a use (2026-11-23): g, h, k, r, r2 print, so the write to x after the computes is gone (x pin [100.0, 2.0, 3.0] -> [1.0, 2.0, 3.0]).
 // Formalism 10.2: a deferred map prints iff a module-level forcing use forced
 // a member of its alias class. A top-level `|> compute` of a map is such a use
 // for every deferred array OPERAND it iterates: an outer product's operand
@@ -22,8 +23,7 @@ let O = object_for(lambda(a: Float64, b: Float64) -> a - b) <@> (h, y) |> comput
 let Z = method_for(zip(k, x)) <@> lambda(a, b) -> a + b |> compute
 let Q = method_for(r2, y) <@> lambda(a, b) -> a + b |> compute
 let v = w |> compute
-x(0) = 100.0
-// EXPECT: x = [100.0, 2.0, 3.0]
+// EXPECT: x = [1.0, 2.0, 3.0]
 // EXPECT: g = [2.0, 4.0, 6.0]
 // EXPECT: h = [6.0, 8.0]
 // EXPECT: k = [0.0, 1.0, 2.0]

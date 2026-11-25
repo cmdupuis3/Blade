@@ -1,0 +1,9 @@
+// TEST: borrow a compute copy forces the named maps two levels down (rejects)
+type I = Idx<3>
+let mut y: Array<Float64 like I> = [2.0, 0.0, 1.0]
+let g2 = method_for(y) <@> lambda(v) -> v + 1.0
+let g5 = method_for(g2) <@> lambda(a) -> a * 3.0
+let g7 = method_for(g5) <@> lambda(a) -> a - 1.0
+let c = g7 |> compute
+y(2) = 9.0
+// ERROR: BL4005 @ 7:1

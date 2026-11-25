@@ -1,4 +1,6 @@
-// TEST: Fold Seed Extent Keeps Private Operand
+// TEST: Fold Seed Extent Keeps Private Operand (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G214, G218).
 // Gap G214 / G218 (round 4 wave 8, Codex design review): the SEED reads only
 // the extent of the deferred operand d, which is no forcing use, so the fold
 // keeps evaluating d privately: d stays deferred and the read w after the
@@ -9,5 +11,4 @@ let p = method_for(d) <@> lambda(v) -> v + 1.0
 let s = reduce(p, (+), Float64(extents(d)))
 x(0) = 10.0
 let w = d(0)
-// EXPECT: s = 18.0
-// EXPECT: w = 20.0
+// ERROR: BL4005 @ 11:1

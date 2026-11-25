@@ -1,4 +1,6 @@
-// TEST: Capturing Lambda Call Keeps The Snapshot
+// TEST: Capturing Lambda Call Keeps The Snapshot (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G238).
 // Gap G238 (round 4 wave 8, Codex review round 3): a let-bound LAMBDA that
 // captures the deferred d is not a named function call: its capture forces d
 // under its own name (a snapshot), so z reads it after the write to x.
@@ -8,6 +10,4 @@ let f = lambda(v: Float64) -> d(0) * v
 let r = f(1.0)
 x(0) = 10.0
 let z = d(0)
-// EXPECT: r = 2.0
-// EXPECT: z = 2.0
-// EXPECT: d = [2.0, 4.0, 6.0]
+// ERROR: BL4005 @ 10:1

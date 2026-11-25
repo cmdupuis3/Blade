@@ -48,6 +48,70 @@ let internal blockLocalVids () : System.Collections.Generic.HashSet<IRId> =
         fresh
     else v
 
+/// A PROJECTION OF A NAMED WHOLLY-DEFERRED TUPLE IS ITS MEMBER (formalism
+/// 10.2, "by substitution"; gap G326, borrow round lane x): `reduce(t[k], op)`
+/// with `let t = (g1, g2)` of named uncomputed maps -- through top-level
+/// aliases of t and nested projections `t[0][1]` -- folds the member's binder
+/// exactly as `reduce(g2, op)` does (it fuses; nothing forces or prints g2).
+/// The judgment is IRLift.deferredTupleMembersOf's at the typed level: the
+/// tuple binder resolves (through aliases) to a tuple literal every member of
+/// which is a deferred value -- an application, a fusion tree, or another such
+/// tuple -- and the projected member is a NAMED binder of a map. Block-local
+/// binders (assignable copies) are never chased. None for anything else (a
+/// value tuple's projection is a copy and is left alone).
+let deferredTupleProjectionMember (env: TypeEnv) (t: TypedExpr) : TypedExpr option =
+    let blockLocal = blockLocalVids ()
+    let rec deferredValue (fuel: int) (m: TypedExpr) : bool =
+        fuel > 0
+        && (match m.Kind with
+            | TExprVar (_, vid, _) when not (blockLocal.Contains vid) ->
+                let r = resolveTypedExprDeep env m
+                not (System.Object.ReferenceEquals (r, m))
+                && (match r.Kind with
+                    | TExprApply _ | TExprFusion _ -> true
+                    | TExprTuple es -> not es.IsEmpty && es |> List.forall (deferredValue (fuel - 1))
+                    | _ -> false)
+            | _ -> false)
+    let rec membersOf (fuel: int) (b: TypedExpr) : TypedExpr list option =
+        if fuel <= 0 then None else
+        match b.Kind with
+        | TExprVar _ when deferredValue 64 b ->
+            (match (resolveTypedExprDeep env b).Kind with
+             | TExprTuple es -> Some es
+             | _ -> None)
+        | TExprTupleIndex (inner, { Kind = TExprLit (LitInt k) }) ->
+            (match membersOf (fuel - 1) inner with
+             | Some es when k >= 0L && k < int64 es.Length -> membersOf (fuel - 1) es.[int k]
+             | _ -> None)
+        | _ -> None
+    match t.Kind with
+    | TExprTupleIndex (b, { Kind = TExprLit (LitInt k) }) ->
+        (match membersOf 64 b with
+         | Some es when k >= 0L && k < int64 es.Length ->
+             let m = es.[int k]
+             (match m.Kind with
+              | TExprVar (_, vid, _) when not (blockLocal.Contains vid) ->
+                  (match (resolveTypedExprDeep env m).Kind with
+                   | TExprApply _ | TExprFusion _ -> Some m
+                   | _ -> None)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
+/// THE BORROW ORACLE'S READING A (borrow round, lane o): when a front-end pass
+/// lowers a program for reading A -- the oracle sets this flag around that
+/// pass (AsyncLocal: concurrent passes do not race), or the user sets
+/// BLADE_INTERP_READING=binding -- a fold over a NAMED uncomputed map keeps the
+/// name (the kept spine / kept tree leaf below) instead of a copy of its
+/// producer, so the interpreter folds the value as evaluated at its binding.
+/// Unset, nothing changes.
+let internal frontEndReadingAtBinding = System.Threading.AsyncLocal<bool>()
+let private readingAtBinding () : bool =
+    frontEndReadingAtBinding.Value
+    || (match Blade.Knobs.raw Blade.Knobs.interpReading with
+        | null -> false
+        | s -> s.Trim().ToLowerInvariant() = "binding")
+
 /// Detect and type the fused reduction terminal. Returns None when the
 /// first argument is NOT a deferred computation (ordinary array reduce
 /// proceeds). Some (Ok ...) types the fold: the child spliced into the
@@ -57,6 +121,9 @@ let internal blockLocalVids () : System.Collections.Generic.HashSet<IRId> =
 /// left-nested scalar pairs for a tree (mirroring `|> compute`'s tuple
 /// convention -- nested pair TYPE, flat make_tuple VALUE, flat projections).
 let rec tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) (tInitOpt: TypedExpr option) : TypeResult<TypedExpr> option =
+    // a projection of a named wholly-deferred tuple folds as its member does
+    // (deferredTupleProjectionMember): every judgment below sees the member
+    let tArr = deferredTupleProjectionMember env tArr |> Option.defaultValue tArr
     // Collect fusion leaves left-to-right, resolving each through bindings.
     // None = the root is not a deferred computation at all (fall through);
     // Some (Error _) = it IS deferred but malformed for a fused fold.
@@ -376,6 +443,13 @@ and tryInferReduceComputeFused (env: TypeEnv) (tKernel: TypedExpr) (tArr: TypedE
             | _ -> [ None ]
         go t
     let keptTreeLeaves (leaves: TypedExpr list) : TypedExpr list =
+        // reading A (readingAtBinding): every named plain-map leaf keeps its name
+        if readingAtBinding () && leaves.Length >= 2 && (leafNames tArr).Length = leaves.Length then
+            List.map2 (fun (name: TypedExpr option) (leaf: TypedExpr) ->
+                match name with
+                | Some nameExpr when plainMapValue leaf -> nameExpr
+                | _ -> leaf) (leafNames tArr) leaves
+        else
         if env.InCallableBody || foldKernelIsParallel () || leaves.Length < 2 then leaves else
         let names = leafNames tArr
         if names.Length <> leaves.Length then leaves else
@@ -411,6 +485,9 @@ and tryInferReduceComputeFused (env: TypeEnv) (tKernel: TypedExpr) (tArr: TypedE
                 else leaf
             | _ -> leaf) names leaves
     let keepSpineName () : bool =
+        // reading A (readingAtBinding): a named plain-map spine keeps its name
+        if readingAtBinding () && tArr.Kind.IsTExprVar
+           && (match collect tArr with Some (Ok [ leaf ]) -> plainMapValue leaf | _ -> false) then true else
         if env.InCallableBody || foldKernelIsParallel () then false else
         match tArr.Kind with
         | TExprVar (_, spineVid0, _) ->

@@ -1,4 +1,6 @@
-// TEST: Rebound Input And Row View Snapshot
+// TEST: Rebound Input And Row View Snapshot (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G199).
 // Gap G199: a whole-array rebinding of x before d is first forced is what d
 // reads (the C++ lane reads x by name at the force), and a row view of a
 // rank-2 deferred map forces the map at the view: a later element write
@@ -12,5 +14,4 @@ let g = method_for(y) <@> lambda(v) -> v * 2.0
 let row = g(0)
 y(0, 0) = 10.0
 let zr = row(0)
-// EXPECT: z = 10.0
-// EXPECT: zr = 2.0
+// ERROR: BL4005 @ 9:1

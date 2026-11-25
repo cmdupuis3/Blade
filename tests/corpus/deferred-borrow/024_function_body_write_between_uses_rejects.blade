@@ -1,0 +1,12 @@
+// TEST: borrow inside a function body, a write between two uses of a module map (rejects)
+// f reads g (a module map over x), writes x, and reads g again: the body's
+// statements run in order.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+function f() -> Float64 = {
+    let a = g(0)
+    x(0) = 5.0
+    a + g(0)
+}
+let r = f()
+// ERROR: BL4005 @ 5:1

@@ -1,0 +1,22 @@
+// TEST: A Function Body's Ordered Call Evaluates A Map That May Fail At Its Own Argument Position
+// Review row T18 (borrow round, lane x): `q` divides (it may fail), so it cannot be evaluated ahead
+// of the call; as the root call's argument it is evaluated at its own position, after `bump` and
+// `seen`, exactly as the module-level ordered call does.
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let mut other: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+function h1(q: Array<Int64 like Row>) -> Int64 = q(0)
+let q = method_for(a) <@> lambda(v) -> 10 / v
+function run() -> Int64 = h(bump(other), seen, q |> compute)
+let r = run()
+// EXPECT: r = 21
+// EXPECT: other = [1]

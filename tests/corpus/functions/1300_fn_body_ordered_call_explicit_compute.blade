@@ -1,0 +1,30 @@
+// TEST: An Ordered Call With An Explicit Compute Of A Module Map Inside A Function Body
+// Review row T18 (borrow round, lane x): the call `h(bump(other), seen, good |> compute)` evaluates its
+// arguments left to right at module level (genOrderedCallBinding); as a function body's return or
+// let it named an undeclared `good` (BL9002). It now takes the same ordered path: bump writes
+// `other` (storage no uncomputed value reads, so the borrow rule accepts it), `seen` is forced
+// at its own position and `good |> compute` is a private copy; `good` and `seen` stay
+// deferred and unprinted.
+type Row = Idx<1>
+let a: Array<Int64 like Row> = [1]
+let mut cnt: Array<Int64 like Row> = [0]
+let mut other: Array<Int64 like Row> = [0]
+let seen = method_for(a) <@> lambda(v) -> v * 10 + cnt(0)
+let seen2 = seen
+let good = method_for(a) <@> lambda(v) -> v + 1
+function bump(c: mut Array<Int64 like Row>) -> Int64 = {
+    c(0) = c(0) + 1
+    c(0)
+}
+function h(k: Int64, p: Array<Int64 like Row>, q: Array<Int64 like Row>) -> Int64 = k + p(0) + q(0)
+function h1(q: Array<Int64 like Row>) -> Int64 = q(0)
+function run() -> Int64 = h(bump(other), seen, good |> compute)
+function run2() -> Int64 = {
+    let t: Int64 = h(bump(other), seen2, good |> compute)
+    t + 100
+}
+let r = run()
+let r2 = run2()
+// EXPECT: r = 13
+// EXPECT: r2 = 114
+// EXPECT: other = [2]

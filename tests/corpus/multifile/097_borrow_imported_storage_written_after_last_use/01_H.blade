@@ -1,0 +1,7 @@
+// TEST: borrow an imported map's input written after its last use
+// MODULE: H
+// The accepted twin of 096: Main only FOLDS H.d (a fold fuses, so H.d never prints: R5),
+// and that last use precedes its write to H.x.
+module H
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let d = method_for(x) <@> lambda(v) -> v * 2.0

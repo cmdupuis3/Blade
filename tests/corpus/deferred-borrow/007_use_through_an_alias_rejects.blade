@@ -1,0 +1,10 @@
+// TEST: borrow a use through a top-level alias (rejects)
+// g2 is the same uncomputed value as g (one alias class): its use after the
+// write is a use of g.
+let mut x: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let g = method_for(x) <@> lambda(v) -> v * 2.0
+let g2 = g
+let a = g(0)
+x(0) = 5.0
+let b = g2(1)
+// ERROR: BL4005 @ 7:1

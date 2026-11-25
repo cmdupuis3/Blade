@@ -79,11 +79,10 @@ let interpExpectedUnsupported : (string * string) list =
       // a reduce over it is unsupported there; the C++ lane passes it whole (the
       // LLVM lane refuses the program and falls back to C++).
       "A map whose kernel takes its first operand WHOLE inside a function body", "reduce over a non-array value"
-      "A top-level map whose kernel takes one operand WHOLE, in either position", "reduce over a non-array value"
-      // G199 (round 4 wave 7 lane B): a fold over a Reynolds-wrapped map
-      // kernel (loops/690); the interpreter has no Reynolds fold, the two
-      // compiled lanes agree (test llvm)
-      "A Reynolds-wrapped fold map kernel forces its capture", "reduce over symmetric/Reynolds/fused computation (M2.5)" ]
+      "A top-level map whose kernel takes one operand WHOLE, in either position", "reduce over a non-array value" ]
+      // (The G199 entry "A Reynolds-wrapped fold map kernel forces its capture", loops/690, left this
+      // list in the borrow round, 2026-11-23: loops/690 is a (rejects) probe now -- it wrote x while d
+      // was still used -- so the interpreter differential never evaluates it.)
 
 /// The slice the `test interp` arm (and `blade test --interp`) runs: EVERY
 /// corpus category on disk -- single-file and multi-file, DISCOVERED -- minus

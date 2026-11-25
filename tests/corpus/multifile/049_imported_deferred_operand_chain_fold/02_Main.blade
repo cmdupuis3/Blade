@@ -1,4 +1,4 @@
-// TEST: An imported deferred map under a deferred chain to fold
+// TEST: An imported deferred map under a deferred chain to fold (rejects)
 // MODULE: Main
 module Main
 import H
@@ -8,5 +8,4 @@ let r3 = reduce(q3, (+), 0.0)
 H.x(0) = 10.0
 let z = H.d(0)
 // 3^2 + 5^2 + 7^2 = 83
-// EXPECT: r3 = 83.0
-// EXPECT: z = 2.0
+// ERROR-CONTAINS: an uncomputed value bound over it before the write

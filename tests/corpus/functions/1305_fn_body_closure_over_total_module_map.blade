@@ -1,0 +1,24 @@
+// TEST: A Function-Body Closure Over A Module Map That Cannot Fail Is Formed Over A Private Evaluation
+// Gap G279 (borrow round, lane x): h is formed in f0's body before anything forces the deferred
+// module map d, so the C++ lane had no stored d to hand the closure (a coded refusal, BL7004, as
+// functions/1178 pinned). d's kernel cannot fail (the closed totality whitelist) and h is only
+// called inside f0, so d is evaluated privately where h is formed and h reads that copy: moving the
+// evaluation is unobservable, and under the borrow rule every call of h is a use of d, so no write
+// can separate the formation from a read. d is not printed (a force inside a call is private).
+type A = Array<Float64 like Idx<2>>
+let mut backing: A = [1.0, 3.0]
+let d = method_for(backing) <@> lambda(e) -> e * 2.0
+let w = method_for(backing) <@> lambda(e) -> e + 0.5
+function f0() -> Float64 = {
+    let h = lambda(i: Int64) -> d(i)
+    h(0) + h(1)
+}
+function f1(k: Int64) -> Float64 = {
+    let s: Float64 = 10.0
+    let g = lambda(i: Int64) -> d(i) * w(i) + s
+    g(k)
+}
+let r1 = f0()
+let r2 = f1(1)
+// EXPECT: r1 = 8.0
+// EXPECT: r2 = 31.0

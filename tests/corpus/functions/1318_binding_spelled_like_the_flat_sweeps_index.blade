@@ -1,0 +1,24 @@
+// TEST: A binding spelled like the flat sweep's index or its cell count is the binding
+// ============================================================================
+// Borrow round, lane x4 (gap G340). The C++ generators write names of their own
+// into the scopes they emit user code into: the flat sweep's loop index `__fk`,
+// its cell count `__fp_cells`, a fold's index `__ri` and lanes `__rlane<l>`. A
+// binding spelled exactly like one was shadowed by it -- `__fk` read inside the
+// map's kernel read the sweep's index ([1.0, 3.0, 5.0], no error). Such a
+// spelling now moves in the emitted C++ (CodeGenEmitterNames, the name table);
+// the program prints and selects it under its own spelling.
+// ============================================================================
+let __fk: Float64 = 10.0
+let __fp_cells: Float64 = 100.0
+let __ri: Float64 = 1000.0
+let __rlane0: Float64 = 2.0
+let a: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]
+let r = method_for(a) <@> lambda(v) -> v + __fk |> compute
+let r2 = method_for(a) <@> lambda(v) -> v + __fp_cells |> compute
+let big: Array<Float64 like Idx<40>> = 0.5 * Float64(0..40)
+let s = reduce(method_for(big) <@> lambda(v) -> v * __ri, (+))
+let s2 = reduce(method_for(big) <@> lambda(v) -> v * __rlane0, (+))
+// EXPECT: r = [11.0, 12.0, 13.0]
+// EXPECT: r2 = [101.0, 102.0, 103.0]
+// EXPECT: s = 390000.0
+// EXPECT: s2 = 780.0

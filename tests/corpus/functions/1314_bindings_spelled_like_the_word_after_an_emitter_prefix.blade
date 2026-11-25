@@ -1,0 +1,32 @@
+// TEST: Bindings Spelled Like The Word An Emitter Name Puts After A Prefix It Also Puts Before Bindings
+// ============================================================================
+// Borrow round, lane x3 (item 1). The emitter forms some C++ names as a fixed
+// prefix before a binding's spelling and mints others under the same prefix
+// with no binding behind them: the flat sweep's pool pointer `__fp_<name>`
+// beside its cell count `__fp_cells`; a transpose's loop variable
+// `__t<name>_<d>` beside a tuple binding's `__tup_<id>`. A binding spelled
+// `cells` that a flat sweep reads or writes redeclared `__fp_cells` (BL9002,
+// "conflicting declaration"). The hole now takes `<name>_` when its core is
+// such a word (CodeGenState.prefixFamilyHole), which is injective: `cells`,
+// `cells_` and `cells__` read in one sweep keep three pools. Pins by hand.
+// ============================================================================
+type I = Idx<3>
+let cells: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let cells_: Array<Float64 like I> = [4.0, 5.0, 6.0]
+let cells__: Array<Float64 like I> = [7.0, 8.0, 9.0]
+let r = cells * 2.0 |> compute
+let r2 = cells + cells_ |> compute
+let r3 = cells + cells_ + cells__ |> compute
+function ends(cells: Array<Float64 like I>) -> Float64 = {
+    let d = cells * 2.0 + 1.0 |> compute
+    d(0) + d(2)
+}
+let e = ends(cells_)
+let m: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let up = transpose(m, [0, 1]) |> compute
+let u = up(2, 0) + up(0, 1)
+// EXPECT: r = [2.0, 4.0, 6.0]
+// EXPECT: r2 = [5.0, 7.0, 9.0]
+// EXPECT: r3 = [12.0, 15.0, 18.0]
+// EXPECT: e = 22.0
+// EXPECT: u = 7.0

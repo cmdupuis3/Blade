@@ -1,0 +1,11 @@
+// TEST: borrow a compute copy forces the named operand map, which then prints (rejects)
+// Materializing g5 for the copy forces its operand g2 under its own name (every lane), so g2 prints at
+// the end of the program, after the write: evaluated at its binding it prints [3.0, 1.0, 2.0], at the end [3.0, 1.0, 10.0].
+type I = Idx<3>
+let mut y: Array<Float64 like I> = [2.0, 0.0, 1.0]
+let g2 = method_for(y) <@> lambda(v) -> v + 1.0
+let g5 = method_for(g2) <@> lambda(a) -> a * 3.0
+let c6 = g5 |> compute
+y(2) = 9.0
+// ERROR: BL4005 @ 8:1
+// ERROR-CONTAINS: it prints at the end of the program

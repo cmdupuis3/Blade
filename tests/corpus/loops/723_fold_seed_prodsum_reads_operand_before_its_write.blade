@@ -1,4 +1,6 @@
-// TEST: Fold Seed Prodsum Reads Operand Before Its Write
+// TEST: Fold Seed Prodsum Reads Operand Before Its Write (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G214).
 // Gap G214 (round 4 wave 8, Codex diff review round 2): the seed writes x and
 // then reads the fold operand d through prodsum. An operand the seed reads is
 // forced under its own name at its OPERAND position, before the seed runs, in
@@ -8,5 +10,4 @@ let d = method_for(x) <@> lambda(v) -> v * 2.0
 let p = method_for(d) <@> lambda(v) -> v + 1.0
 let s = reduce(p, (+), { x(0) = 10.0; prodsum(d, x) })
 let w = d(0)
-// EXPECT: s = 61.0
-// EXPECT: w = 2.0
+// ERROR: BL4005 @ 10:1

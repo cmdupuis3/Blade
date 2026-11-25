@@ -1,4 +1,6 @@
-// TEST: Dependent Map Reads The Forced Snapshot
+// TEST: Dependent Map Reads The Forced Snapshot (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G199).
 // Gap G199: p was bound over d while d was still deferred; d is then forced
 // (z = d(0)) and x written. Forcing p reads d BY NAME -- the stored
 // snapshot -- so w = 3.0. The LLVM lane captured d as a producer when p was
@@ -17,8 +19,4 @@ let w = p(0)
 let wa = pa(0)
 let s = reduce(q, (+), 0.0)
 let m = mask(p, lambda(v) -> v < 10.0)
-// EXPECT: z = 2.0
-// EXPECT: w = 3.0
-// EXPECT: wa = 3.0
-// EXPECT: s = 83.0
-// EXPECT: m = [true, true, true]
+// ERROR: BL4005 @ 16:1

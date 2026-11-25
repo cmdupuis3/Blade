@@ -1,0 +1,9 @@
+// TEST: borrow an imported map's input written after its last use
+// MODULE: Main
+module Main
+import H
+let s = reduce(H.d, (+))
+H.x(0) = 10.0
+let z = H.x(0)
+// EXPECT: s = 12.0
+// EXPECT: z = 10.0

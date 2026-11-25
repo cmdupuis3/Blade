@@ -781,6 +781,14 @@ with a compile-time shape are forwarded to the device)" hostName)
 /// its own image.
 let kernelsPanicBinder = "blade_kernels_bind_panic"
 
+/// A CUDA device pointer for an operand or capture spelled `s`: `__blade_d_<s>`, never
+/// the output's `__blade_d_out` / `__blade_d_out_<k>` (an array named `out` or `out_0`:
+/// lane x3, prefixFamilyHole).
+let private cudaDevicePtr (s: string) : string =
+    let outWord (w: string) =
+        w = "out" || (w.Length > 4 && w.StartsWith "out_" && w.Substring 4 |> Seq.forall System.Char.IsDigit)
+    "__blade_d_" + prefixFamilyHole outWord s
+
 let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
     // Detect a single S-dim symmetry group of arity >= 2 (sym or antisym).
     let grpOpt =
@@ -947,14 +955,14 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
               "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
               "    cudaSetDevice(__blade_rank % __blade_dc);"
               $"    size_t __blade_card = {card}UL;"
-              $"    {srcDevCpp}* __blade_d_{srcName}; cudaMalloc(&__blade_d_{srcName}, {n}UL * sizeof({srcDevCpp}));"
-              $"    cudaMemcpy(__blade_d_{srcName}, {srcName}, {n}UL * sizeof({srcDevCpp}), cudaMemcpyHostToDevice);"
+              $"    {srcDevCpp}* {(cudaDevicePtr srcName)}; cudaMalloc(&{(cudaDevicePtr srcName)}, {n}UL * sizeof({srcDevCpp}));"
+              $"    cudaMemcpy({(cudaDevicePtr srcName)}, {srcName}, {n}UL * sizeof({srcDevCpp}), cudaMemcpyHostToDevice);"
               $"    {devElemCpp}* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof({devElemCpp}));"
               $"    size_t __blade_blocks = ((__blade_rhi - __blade_rlo) + {blockSize}UL - 1UL) / {blockSize}UL;"
-              $"    {kernelName}<<<(unsigned)__blade_blocks, {blockSize}>>>(__blade_d_{srcName}, __blade_d_out, __blade_rlo, __blade_rhi);"
+              $"    {kernelName}<<<(unsigned)__blade_blocks, {blockSize}>>>({(cudaDevicePtr srcName)}, __blade_d_out, __blade_rlo, __blade_rhi);"
               "    cudaDeviceSynchronize();"
               $"    cudaMemcpy(__blade_host_out + __blade_rlo, __blade_d_out + __blade_rlo, (__blade_rhi - __blade_rlo) * sizeof({devElemCpp}), cudaMemcpyDeviceToHost);"
-              $"    cudaFree(__blade_d_{srcName});"
+              $"    cudaFree({(cudaDevicePtr srcName)});"
               "    cudaFree(__blade_d_out);"; "}" ]
         elif softSplit then
             // <&> soft-join split wrappers (see genCudaKernel's softSplit arm):
@@ -986,14 +994,14 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
         else
             [ $"extern \"C\" void {launchName}(const {srcHostCpp}* {srcName}, {elemCpp}* __blade_host_out) {{"
               $"    size_t __blade_card = {card}UL;"
-              $"    {srcDevCpp}* __blade_d_{srcName}; cudaMalloc(&__blade_d_{srcName}, {n}UL * sizeof({srcDevCpp}));"
-              $"    cudaMemcpy(__blade_d_{srcName}, {srcName}, {n}UL * sizeof({srcDevCpp}), cudaMemcpyHostToDevice);"
+              $"    {srcDevCpp}* {(cudaDevicePtr srcName)}; cudaMalloc(&{(cudaDevicePtr srcName)}, {n}UL * sizeof({srcDevCpp}));"
+              $"    cudaMemcpy({(cudaDevicePtr srcName)}, {srcName}, {n}UL * sizeof({srcDevCpp}), cudaMemcpyHostToDevice);"
               $"    {devElemCpp}* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof({devElemCpp}));"
               $"    size_t __blade_blocks = (__blade_card + {blockSize}UL - 1UL) / {blockSize}UL;"
-              $"    {kernelName}<<<(unsigned)__blade_blocks, {blockSize}>>>(__blade_d_{srcName}, __blade_d_out, __blade_card);"
+              $"    {kernelName}<<<(unsigned)__blade_blocks, {blockSize}>>>({(cudaDevicePtr srcName)}, __blade_d_out, __blade_card);"
               "    cudaDeviceSynchronize();"
               $"    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof({devElemCpp}), cudaMemcpyDeviceToHost);"
-              $"    cudaFree(__blade_d_{srcName});"
+              $"    cudaFree({(cudaDevicePtr srcName)});"
               "    cudaFree(__blade_d_out);"; "}" ]
     // Emit the __device__ binomial helper once per .cu. Idempotency is keyed on
     // the cell's own contents (race-safe: cudaKernelDefsCell is AsyncLocal, so each
@@ -1432,11 +1440,11 @@ wrappers stage only the leaf's own operands)"
             | None -> [ $"{c.HostCpp} {c.DevName}" ])
     /// The argument each capture contributes at the launch, given a prefix for
     /// the device buffer of an array one (scalars pass straight through).
-    let capLaunchArgs (bufPrefix: string) =
+    let capLaunchArgs (bufName: string -> string) =
         caps |> List.collect (fun c ->
             match c.Cells with
             | Some cells ->
-                $"{bufPrefix}{c.DevName}"
+                bufName c.DevName
                 // At the HOST call site a runtime count is its host expression;
                 // INSIDE the wrapper it is already the parameter, so the same
                 // list serves both (the wrapper forwards the name it was given).
@@ -1522,8 +1530,8 @@ wrappers stage only the leaf's own operands)"
         @ [ for (i, n) in List.mapi (fun i n -> (i, n)) codeGen.InputArrayNames do
               let sz = inputCellsText i |> Option.defaultValue cardinalityText
               let et = inputDevCpp.[i]
-              yield $"    {et}* __blade_d_{n}; cudaMalloc(&__blade_d_{n}, {sz} * sizeof({et}));"
-              yield $"    cudaMemcpy(__blade_d_{n}, {n}, {sz} * sizeof({et}), cudaMemcpyHostToDevice);" ]
+              yield $"    {et}* {(cudaDevicePtr n)}; cudaMalloc(&{(cudaDevicePtr n)}, {sz} * sizeof({et}));"
+              yield $"    cudaMemcpy({(cudaDevicePtr n)}, {n}, {sz} * sizeof({et}), cudaMemcpyHostToDevice);" ]
         // Forwarded captures travel exactly as the operands do: an array capture
         // gets its own device buffer staged here (the wrapper takes the host
         // pool pointer), a scalar one rides the signature by value.
@@ -1531,24 +1539,24 @@ wrappers stage only the leaf's own operands)"
               match c.Cells with
               | Some cells ->
                   let sz = cudaCellsText cells
-                  yield $"    {c.DevCpp}* __blade_d_{c.DevName}; cudaMalloc(&__blade_d_{c.DevName}, {sz} * sizeof({c.DevCpp}));"
-                  yield $"    cudaMemcpy(__blade_d_{c.DevName}, {c.DevName}, {sz} * sizeof({c.DevCpp}), cudaMemcpyHostToDevice);"
+                  yield $"    {c.DevCpp}* {(cudaDevicePtr c.DevName)}; cudaMalloc(&{(cudaDevicePtr c.DevName)}, {sz} * sizeof({c.DevCpp}));"
+                  yield $"    cudaMemcpy({(cudaDevicePtr c.DevName)}, {c.DevName}, {sz} * sizeof({c.DevCpp}), cudaMemcpyHostToDevice);"
               | None -> () ]
         @ [ $"    {devElemCpp}* __blade_d_out; cudaMalloc(&__blade_d_out, __blade_card * sizeof({devElemCpp}));"
             $"    size_t __blade_blocks = (__blade_card + {blockSize}UL - 1UL) / {blockSize}UL;"
             sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, __blade_d_out, __blade_card);" kernelName blockSize
-              ((codeGen.InputArrayNames |> List.map (sprintf "__blade_d_%s"))
-               @ capLaunchArgs "__blade_d_"
+              ((codeGen.InputArrayNames |> List.map cudaDevicePtr)
+               @ capLaunchArgs cudaDevicePtr
                // The runtime extents the wrapper was handed, forwarded verbatim:
                // `cudaCellsParam` named them, so the parameter IS the argument.
                @ (dims |> List.choose (function CellsRuntime (_, p) -> Some p | CellsStatic _ -> None))
                |> String.concat ", ")
             "    cudaDeviceSynchronize();"
             $"    cudaMemcpy(__blade_host_out, __blade_d_out, __blade_card * sizeof({devElemCpp}), cudaMemcpyDeviceToHost);" ]
-        @ [ for n in codeGen.InputArrayNames -> $"    cudaFree(__blade_d_{n});" ]
+        @ [ for n in codeGen.InputArrayNames -> $"    cudaFree({(cudaDevicePtr n)});" ]
         @ [ for c in caps do
               match c.Cells with
-              | Some _ -> yield $"    cudaFree(__blade_d_{c.DevName});"
+              | Some _ -> yield $"    cudaFree({(cudaDevicePtr c.DevName)});"
               | None -> () ]
         @ [ "    cudaFree(__blade_d_out);"; "}" ]
     let cell = cudaKernelDefsCell ()
@@ -1726,21 +1734,21 @@ let genCudaCoFusion (leafCgs: LoopNestCodeGen list) (leafNames: string list) (na
         @ [ for (i, n) in List.mapi (fun i n -> (i, n)) primary.InputArrayNames do
               let sz = extentLits |> List.fold (fun a n -> a * n) 1L  // inputs span the same grid cardinality
               let et = inputDevCpp.[i]
-              yield $"    {et}* __blade_d_{n}; cudaMalloc(&__blade_d_{n}, {sz}UL * sizeof({et}));"
-              yield $"    cudaMemcpy(__blade_d_{n}, {n}, {sz}UL * sizeof({et}), cudaMemcpyHostToDevice);" ]
+              yield $"    {et}* {(cudaDevicePtr n)}; cudaMalloc(&{(cudaDevicePtr n)}, {sz}UL * sizeof({et}));"
+              yield $"    cudaMemcpy({(cudaDevicePtr n)}, {n}, {sz}UL * sizeof({et}), cudaMemcpyHostToDevice);" ]
         @ [ for k in 0 .. leafCgs.Length - 1 do
               let et = (outElemOpt leafCgs.[k]).Value |> cudaDevElemTypeToCpp
               yield $"    {et}* __blade_d_out_{k}; cudaMalloc(&__blade_d_out_{k}, __blade_card * sizeof({et}));" ]
         @ [ $"    size_t __blade_blocks = (__blade_card + {blockSize}UL - 1UL) / {blockSize}UL;"
             sprintf "    %s<<<(unsigned)__blade_blocks, %d>>>(%s, %s, __blade_card);"
                 kernelName blockSize
-                (primary.InputArrayNames |> List.map (sprintf "__blade_d_%s") |> String.concat ", ")
+                (primary.InputArrayNames |> List.map cudaDevicePtr |> String.concat ", ")
                 (List.init leafCgs.Length (sprintf "__blade_d_out_%d") |> String.concat ", ")
             "    cudaDeviceSynchronize();" ]
         @ [ for k in 0 .. leafCgs.Length - 1 do
               let et = (outElemOpt leafCgs.[k]).Value |> cudaDevElemTypeToCpp
               yield $"    cudaMemcpy(__blade_host_out_{k}, __blade_d_out_{k}, __blade_card * sizeof({et}), cudaMemcpyDeviceToHost);" ]
-        @ [ for n in primary.InputArrayNames -> $"    cudaFree(__blade_d_{n});" ]
+        @ [ for n in primary.InputArrayNames -> $"    cudaFree({(cudaDevicePtr n)});" ]
         @ [ for k in 0 .. leafCgs.Length - 1 -> $"    cudaFree(__blade_d_out_{k});" ]
         @ [ "}" ]
     let cell = cudaKernelDefsCell ()
@@ -3417,7 +3425,7 @@ let private materializeApplyOperands (ctx: CodeGenContext) (name: string) (ind: 
                 // compound slot must be the range's SOLE index type for now;
                 // mixing (range<CompoundIdx<m>, J>) is unsupported.
                 // per OUTPUT: two tabulated ranges in one program would otherwise redeclare one driver index
-                let rname = $"__range{i}_{name}"
+                let rname = rangeHolderName i name
                 (match idxTys with
                  | [ix] ->
                      (match ix.Extent with
@@ -3459,7 +3467,7 @@ let private materializeApplyOperands (ctx: CodeGenContext) (name: string) (ind: 
                 // serve both tabulated kinds unchanged. Iteration visits the
                 // keys in GIVEN order (never sorted).
                 // per OUTPUT: two tabulated ranges in one program would otherwise redeclare one driver index
-                let rname = $"__range{i}_{name}"
+                let rname = rangeHolderName i name
                 (match idxTys with
                  | [ix] ->
                      (match ix.Extent with
@@ -3501,7 +3509,7 @@ let private materializeApplyOperands (ctx: CodeGenContext) (name: string) (ind: 
                 // names are in scope. The loop bound and the output-extents fill
                 // read `.extents` exactly as they read an array operand; the
                 // element binding reads `.offset`.
-                let rname = $"__range{i}_{name}"
+                let rname = rangeHolderName i name
                 let plainSlots =
                     idxTys |> List.forall (fun ix ->
                         ix.IxKind = IxKPlain && ix.Rank = 1

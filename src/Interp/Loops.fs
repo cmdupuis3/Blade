@@ -341,6 +341,34 @@ let private evalArrayLit (st: InterpState) (env: Env) (elems: IRExpr list) (arrT
 /// Public Force hook: drive a possibly-deferred Value to a concrete one.
 let rec force (st: InterpState) (env: Env) (v: Value) : Value =
     match v with
+    // READING B (BLADE_INTERP_READING=use): a suspension is evaluated afresh
+    // at each use from the current inputs and never kept in its cell. Two uses
+    // with no assignment between them read the same inputs, so the value of
+    // the first is reused at the same write count (InterpState.ReadMemo) --
+    // unless its own evaluation wrote, in which case each use re-runs it.
+    | VDeferred (expr, denv) when st.Reading = ReadingAtUse ->
+        (match st.ReadMemo.TryGetValue v with
+         | true, struct (epoch, fv) when epoch = st.WriteEpoch -> fv
+         | _ ->
+            let epoch = st.WriteEpoch
+            let fv =
+                match st.DeferredBindingIndex.TryGetValue expr with
+                | true, _ when st.FunctionCallDepth > 0 -> forceExpr st denv expr
+                | true, _ ->
+                    (match expr with
+                     // a deferred alias: its source's value (evaluated afresh,
+                     // the same rule), copied as the alias holds a copy
+                     | IRVar (srcId, ty) when (match Blade.IR.stripUnits ty with ArrayElem _ -> true | _ -> false) ->
+                         (match st.Global |> Option.bind (fun g -> envTryFind g srcId) with
+                          | Some srcCell ->
+                              (match force st denv srcCell.V with
+                               | VArray ba when Core.isDenseCopyableArray ba -> VArray (copyBladeArray ba)
+                               | other -> other)
+                          | None -> forceExpr st denv expr)
+                     | _ -> forceExpr st denv expr)
+                | _ -> forceExpr st denv expr
+            if st.WriteEpoch = epoch then st.ReadMemo.[v] <- struct (epoch, fv)
+            fv)
     | VDeferred (expr, denv) ->
         // Forced-on-read auto-print parity: a payload that is a module-level
         // binding's Value node (hit in DeferredBindingIndex) means this force
@@ -509,7 +537,10 @@ and private resolveComp (st: InterpState) (env: Env) (expr: IRExpr) (wrappers: I
             | _ -> (expr, wrappers, env)
         | None -> (expr, wrappers, env)
     | IRCompute inner -> resolveComp st env inner wrappers
-    | IRFunctorMap (f, inner) -> resolveComp st env inner (f :: wrappers)
+    // a composed stage applies its stages in order (lane x3; the C++ lane's
+    // CodeGenState.expandStage): `f >> g` is f then g, through a binding of a
+    // composition (`let nd = neg >> dbl`, a VDeferred IRCompose) too
+    | IRFunctorMap (f, inner) -> resolveComp st env inner (expandStageIn env Set.empty f @ wrappers)
     | IRGuard (cond, body) ->
         let (r, w, e) = resolveComp st env body wrappers
         (IRGuard (cond, r), w, e)
@@ -518,6 +549,21 @@ and private resolveComp (st: InterpState) (env: Env) (expr: IRExpr) (wrappers: I
         | Some k -> resolveComp st env left (k :: wrappers)
         | None -> (expr, wrappers, env)
     | _ -> (expr, wrappers, env)
+
+/// A `<$>` stage as the stages it applies, innermost first: a composition
+/// `f >> g` is f then g, inline or bound to a name, nested to any depth; any
+/// other stage is itself.
+and private expandStageIn (env: Env) (seen: Set<IRId>) (f: IRExpr) : IRExpr list =
+    match f with
+    | IRCompose (a, b) -> expandStageIn env seen a @ expandStageIn env seen b
+    | IRVar (id, _) when not (seen.Contains id) ->
+        (match envTryFind env id with
+         | Some cell ->
+             (match cell.V with
+              | VDeferred ((IRCompose _ as c), _) -> expandStageIn env (seen.Add id) c
+              | _ -> [ f ])
+         | None -> [ f ])
+    | _ -> [ f ]
 
 /// Mirror resolveComputation's IRComposeMeth kernel extraction (7509): reach the
 /// right operand's inline kernel through deferred vars / functor-map composition.
@@ -540,7 +586,11 @@ and private extractInlinableKernel (st: InterpState) (env: Env) (e: IRExpr) : IR
 /// that bottomed out at a CONCRETE array (or scalar), e.g. `f <$> A` over a
 /// plain array. Mirrors materializeComposeApply's wrapAll fold (IRCompose(k,f)
 /// = f.k) so the result matches `method_for(A) <@> f |> compute` byte-for-byte.
-and private applyWrappersToValue (st: InterpState) (env: Env) (wrappers: IRExpr list) (v: Value) : Value =
+///
+/// `staticElem`: the element type of the forced expression's static IR type,
+/// when the caller has that expression (forceExpr): the first source of the
+/// result's element type (stageResultElem).
+and private applyWrappersToValue (st: InterpState) (env: Env) (staticElem: IRType option) (wrappers: IRExpr list) (v: Value) : Value =
     if List.isEmpty wrappers then v else
     let rec wrapperFn (w: IRExpr) : (Value -> Value) =
         match w with
@@ -549,22 +599,100 @@ and private applyWrappersToValue (st: InterpState) (env: Env) (wrappers: IRExpr 
     let wrapAll = wrappers |> List.fold (fun acc w -> let wf = wrapperFn w in (fun x -> wf (acc x))) id
     match v with
     | VArray a ->
-        let out = A.allocDense a.ElemType a.IndexTypes a.Extents
-        let rank = a.Extents.Length
-        let rec walk (level: int) (acc: int64 list) =
-            if level = rank then
-                let coords = List.rev acc
-                A.writeCell out coords (wrapAll (A.readCell a coords))
-            else
-                for i in 0L .. a.Extents.[level] - 1L do walk (level + 1) (i :: acc)
-        walk 0 []
-        VArray out
+        // Stored with the STAGE's element type, never the input's:
+        // `positive <$> (c <|> c)` over Float64 cells is a Bool array, as the
+        // compiled lanes allocate it (borrow round, lane o: the input's type
+        // stored true as 1.0 and printed it false).
+        VArray (stageWalk a staticElem wrappers wrapAll)
     | scalar -> wrapAll scalar
+
+/// One stage pass over a concrete array: the kernel runs once per cell, in
+/// ascending storage order, and writes straight into the output, which is
+/// allocated at the FIRST cell (stageResultElem may need that cell's value);
+/// an empty input allocates from the static or declared type alone.
+and private stageWalk (a: BladeArray) (staticElem: IRType option) (wrappers: IRExpr list) (cellFn: Value -> Value) : BladeArray =
+    let rank = a.Extents.Length
+    let out : BladeArray option ref = ref None
+    let rec walk (level: int) (acc: int64 list) =
+        if level = rank then
+            let coords = List.rev acc
+            let value = cellFn (A.readCell a coords)
+            let o =
+                match out.Value with
+                | Some o -> o
+                | None ->
+                    let o = A.allocDense (stageResultElem staticElem wrappers a.ElemType (Some value)) a.IndexTypes a.Extents
+                    out.Value <- Some o
+                    o
+            A.writeCell o coords value
+        else
+            for i in 0L .. a.Extents.[level] - 1L do walk (level + 1) (i :: acc)
+    walk 0 []
+    match out.Value with
+    | Some o -> o
+    | None -> A.allocDense (stageResultElem staticElem wrappers a.ElemType None) a.IndexTypes a.Extents
+
+/// The element type a stage stack stores (applyWrappersToValue,
+/// forceComposeMeth), first source that answers: the STATIC type of the
+/// forced expression (a scalar element type, units included; IR.typeOf types
+/// a staged node `f <$> c` by f's return type, an alias by its binding's
+/// array type); the declared scalar return type of the LAST kernel applied
+/// (the stack is innermost-first; a composition `IRCompose (k, f)` ends with
+/// f); the kind of the first computed cell when it differs from the input's
+/// (a generic kernel); else the input's element type.
+and private stageResultElem (staticElem: IRType option) (wrappers: IRExpr list) (inputElem: IRType) (firstCell: Value option) : IRType =
+    let isScalarType (t: IRType) =
+        match stripUnits t with
+        | IRTScalar _ | IRTIdxTagged (IRTScalar _, _) -> true
+        | _ -> false
+    match staticElem with
+    | Some s when isScalarType s -> s
+    | _ ->
+    let rec declaredRet (w: IRExpr) : IRType option =
+        match w with
+        | IRCompose (_, f) -> declaredRet f
+        | _ ->
+            match (try Some (typeOf w) with _ -> None) with
+            | Some (FuncElem (_, ret)) when isScalarType ret -> Some ret
+            | _ ->
+                match resolveKernel w with
+                | Some rk when isScalarType rk.Callable.RetType -> Some rk.Callable.RetType
+                | _ -> None
+    match wrappers |> List.tryLast |> Option.bind declaredRet with
+    | Some ret -> ret
+    | None ->
+    let kindOf (v: Value) =
+        match v with
+        | VBool _ -> Some ETBool
+        | VInt _ -> Some ETInt64
+        | VInt32 _ -> Some ETInt32
+        | VFloat _ -> Some ETFloat64
+        | VFloat32 _ -> Some ETFloat32
+        | VComplex _ -> Some ETComplex128
+        | VComplex64 _ -> Some ETComplex64
+        | _ -> None
+    match firstCell |> Option.bind kindOf, A.elemThrough inputElem with
+    | Some k, Some ik when k <> ik -> IRTScalar k
+    | _ -> inputElem
+
+/// The element type of an expression's static IR type, for stageResultElem:
+/// an array type's element, a scalar type itself; None when typeOf cannot
+/// answer.
+and private staticElemOf (expr: IRExpr) : IRType option =
+    match (try Some (typeOf expr) with _ -> None) with
+    | Some t ->
+        (match stripUnits t with
+         | ArrayElem at -> Some at.ElemType
+         | IRTScalar _ | IRTIdxTagged (IRTScalar _, _) -> Some t
+         | _ -> None)
+    | None -> None
 
 /// Force an IRExpr (the deferred payload) to a concrete Value. Mirrors
 /// genComputeBinding's resolveComputation + dispatch.
 and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     let (resolved, wrappers, renv) = resolveComp st env expr []
+    // read only when a stage stack applies to a concrete value
+    let staticElem () = if List.isEmpty wrappers then None else staticElemOf expr
     match resolved with
     | IRApplyCombinator info -> materializeApply st renv info wrappers
     | IRParallel _ | IRFusion _ -> forceParallelTree st renv resolved wrappers
@@ -572,8 +700,8 @@ and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IRFallback (a, b) -> forceFallback st renv a b wrappers
     | IRGuard (cond, body) -> forceGuard st renv cond body wrappers
     | IRSequence elems -> forceSequence st renv elems wrappers
-    | IRBind (comp, cont) -> forceBind st renv comp cont
-    | IRComposeMeth (left, right) -> forceComposeMeth st renv left right
+    | IRBind (comp, cont) -> forceBind st renv comp cont wrappers
+    | IRComposeMeth (left, right) -> applyWrappersToValue st renv (staticElem ()) wrappers (forceComposeMeth st renv left right)
     | IRComposeApply cinfo -> materializeComposeApply st renv cinfo wrappers
     | IRComposeObj _ -> raise (InterpUnsupported "IRComposeObj force")
     // A projection of a deferred tuple (`(c1,c2) = <combinator producing a tuple>`,
@@ -581,13 +709,18 @@ and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     // force the projected element (itself possibly a deferred computation).
     | IRTupleProj (inner, i, isFlat) ->
         let tv = forceExpr st renv inner
-        applyWrappersToValue st renv wrappers (force st renv (projectValue tv i isFlat))
+        (match projectValue tv i isFlat with
+         // a deferred member takes the stage INSIDE (it may be a choice or a
+         // guard, whose laws test the stage's cells)
+         | VDeferred (e, denv) when not (List.isEmpty wrappers) && not e.IsIRCompose ->
+             forceExpr st denv (wrappers |> List.fold (fun acc w -> IRFunctorMap (w, acc)) e)
+         | mv -> applyWrappersToValue st renv (staticElem ()) wrappers (force st renv mv))
     | IRVar (id, _) ->
         // A base that bottomed out at a CONCRETE array/scalar (resolveComp already
         // followed any VDeferred alias); apply the trailing functor wrappers here:
         // `f <$> A` over a plain array A.
         match envTryFind renv id with
-        | Some cell -> applyWrappersToValue st renv wrappers (force st renv cell.V)
+        | Some cell -> applyWrappersToValue st renv (staticElem ()) wrappers (force st renv cell.V)
         | None -> raise (InterpUnsupported "force of unbound var")
     // A BARE range forced as a value (`let xs = 0..n` via evalBinding's eager
     // force, `reduce(0..n, (+))`, `0..n |> compute`): materialize the iota,
@@ -616,9 +749,9 @@ and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
              let arrType : IRArrayType =
                  { ElemType = IRTScalar ETInt64; IndexTypes = [ix]; IsVirtual = false; Identity = None }
              let vals = [ for i in 0L .. n - 1L -> VInt (off + i) ]
-             applyWrappersToValue st renv wrappers (VArray (A.arrayLitFromValues arrType vals))
+             applyWrappersToValue st renv (staticElem ()) wrappers (VArray (A.arrayLitFromValues arrType vals))
          | _ -> raise (InterpUnsupported "force of a compound/sparse/halo or multi-slot range"))
-    | other -> applyWrappersToValue st renv wrappers (Core.evalExpr st renv other)
+    | other -> applyWrappersToValue st renv (staticElem ()) wrappers (Core.evalExpr st renv other)
 
 // ----------------------------------------------------------------------------
 // Parallel / fusion: collect leaves (flatten <&>/<&!>, resolve deferred vars),
@@ -717,11 +850,28 @@ and private forceFallback (st: InterpState) (env: Env) (a: IRExpr) (b: IRExpr) (
 // kernel body (lambda args -> cond ? body : 0) via a synthetic callable, then
 // materialize -- an allocated array filled with zeros where the guard is false.
 // ----------------------------------------------------------------------------
+//
+// A STAGE over a guard obeys left distribution (formalism 10.4):
+// `f <$> guard(p, c) = guard(p, f <$> c)` -- the stage's cells where p holds,
+// the zero of the STAGE's result type where it does not, never f applied to a
+// zero cell. So the stage goes INSIDE: composed into the kernel before the
+// guard is folded in (an apply body), or pushed into the body as a functor map
+// that the body's own force distributes further (a choice, a nested guard, a
+// sequence, a stored or computed array).
 and private forceGuard (st: InterpState) (env: Env) (cond: IRExpr) (body: IRExpr) (wrappers: IRExpr list) : Value =
     let (resolved, innerWrappers, renv) = resolveComp st env body []
-    let allWrappers = wrappers @ innerWrappers
+    // innermost first: the body's own stages, then the ones around the guard
+    let allWrappers = innerWrappers @ wrappers
     match resolved with
-    | IRApplyCombinator info ->
+    | IRApplyCombinator info0 ->
+        // a non-Reynolds kernel takes the stage stack first (the guard's zero
+        // is then the stage's result type's); a Reynolds kernel keeps the
+        // as-written order (its stage is the post-sum envelope, which the
+        // guard's per-term fold cannot wrap: OPEN, rows-o.md)
+        let (_, rdesc) = peelReynolds info0.Kernel
+        let (info, after) =
+            if rdesc.HasReynolds || List.isEmpty allWrappers then (info0, allWrappers)
+            else (applyFunctorWrappers st info0 allWrappers, [])
         let zeroForReturnType (retTy: IRType) =
             match retTy with
             | IRTScalar ETBool -> IRLit (IRLitBool false)
@@ -733,16 +883,19 @@ and private forceGuard (st: InterpState) (env: Env) (cond: IRExpr) (body: IRExpr
             let synthetic = { c with Id = st.Builder.FreshId(); Body = IRIf (cond, c.Body, zeroForReturnType c.RetType) }
             registerSyntheticCallable synthetic
         let wrappedKernel = mapKernelInner buildGuarded info.Kernel
-        materializeApply st renv { info with Kernel = wrappedKernel } allWrappers
+        materializeApply st renv { info with Kernel = wrappedKernel } after
     | IRParallel _ | IRFusion _ ->
         raise (InterpUnsupported "guard over a parallel/fusion computation")
     | _ ->
         // guard over a CONCRETE array / scalar (or choice/sequence) body: the
         // predicate is a scalar here (it cannot reference per-cell values without a
-        // kernel), so evaluate it once: true -> the (wrapper-applied) materialized
-        // body, false -> a zero array/scalar of the same shape. Mirrors CodeGen's
-        // non-apply guard materialization.
-        let bodyVal = applyWrappersToValue st renv allWrappers (forceExpr st renv resolved)
+        // kernel), so evaluate it once: true -> the materialized body with the
+        // stage pushed inside it (a choice tests the STAGE's cells, as
+        // `(f <$> a) <|> (f <$> b)`), false -> a zero array/scalar of the
+        // same shape and of the stage's type. Mirrors CodeGen's non-apply guard
+        // materialization.
+        let staged = allWrappers |> List.fold (fun acc w -> IRFunctorMap (w, acc)) resolved
+        let bodyVal = forceExpr st renv staged
         if isNonZero (Core.evalExpr st env cond) then bodyVal
         else
             match bodyVal with
@@ -788,7 +941,11 @@ and private forceSequence (st: InterpState) (env: Env) (elems: IRExpr list) (wra
 // Bind (genBindChainBinding / IRBind force 7724): materialize comp as s1, bind
 // the continuation's parameter to s1's value, force the continuation body.
 // ----------------------------------------------------------------------------
-and private forceBind (st: InterpState) (env: Env) (comp: IRExpr) (cont: IRExpr) : Value =
+///
+/// `wrappers`: a stage stack around the bind goes into the continuation's
+/// result (formalism 10.1: `f <$> (c >>= k) = c >>= (\x. f <$> k x)`); it used
+/// to be dropped.
+and private forceBind (st: InterpState) (env: Env) (comp: IRExpr) (cont: IRExpr) (wrappers: IRExpr list) : Value =
     let s1 = forceExpr st env comp
     match resolveCallable (resolveContRef st env cont) with
     | Some lInfo when lInfo.Params.Length >= 1 ->
@@ -797,7 +954,7 @@ and private forceBind (st: InterpState) (env: Env) (comp: IRExpr) (cont: IRExpr)
         for c in lInfo.Captures do
             match envTryFind env c.Id with Some cell -> envBindRef benv c.Id cell | None -> ()
         // The continuation body is itself a computation (IRCompute-wrapped).
-        forceExpr st benv lInfo.Body
+        forceExpr st benv (wrappers |> List.fold (fun acc w -> IRFunctorMap (w, acc)) lInfo.Body)
     | _ -> raise (InterpUnsupported "bind continuation does not resolve to a callable")
 
 and private resolveContRef (st: InterpState) (env: Env) (e: IRExpr) : IRExpr =
@@ -830,16 +987,9 @@ and private forceComposeMeth (st: InterpState) (env: Env) (left: IRExpr) (right:
                     callable.Captures
                     |> List.choose (fun c -> envTryFind env c.Id |> Option.map (fun cell -> (c.Id, cell)))
                     |> Map.ofList
-                let out = A.allocDense a.ElemType a.IndexTypes a.Extents
-                let rank = a.Extents.Length
-                let rec walk (level: int) (acc: int64 list) =
-                    if level = rank then
-                        let coords = List.rev acc
-                        A.writeCell out coords (Core.evalCall st callable caps [ A.readCell a coords ])
-                    else
-                        for i in 0L .. a.Extents.[level] - 1L do walk (level + 1) (i :: acc)
-                walk 0 []
-                VArray out
+                // stored with the right kernel's own element type, not the
+                // input's (stageResultElem, as applyWrappersToValue)
+                VArray (stageWalk a None [ kernelRef ] (fun x -> Core.evalCall st callable caps [ x ]))
             | _ -> raise (InterpUnsupported "compose-meth right kernel arity != 1")
         | None -> raise (InterpUnsupported "compose-meth right kernel not resolvable")
     | _ -> raise (InterpUnsupported "compose-meth left side is not an array")
@@ -2213,7 +2363,9 @@ and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : Arra
                 // MODULE map read inside a function call: its evaluation there
                 // is private, per reading statement, never stored under the
                 // module name (G75; gap G257: `force` already skips the memo)
-                if not (st.FunctionCallDepth > 0 && st.DeferredBindingIndex.ContainsKey dexpr) then
+                // -- and never under reading B, which keeps nothing in a cell
+                if st.Reading <> ReadingAtUse
+                   && not (st.FunctionCallDepth > 0 && st.DeferredBindingIndex.ContainsKey dexpr) then
                     cell.V <- fv
                 (match fv with
                  | VArray a -> SReal a
@@ -3545,8 +3697,10 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
                       | VDeferred (dexpr, _) as d ->
                           let fv = force st env d
                           // memoize, as resolveArraySource does -- never a module
-                          // map forced inside a function call (G75, gap G257)
-                          if not (st.FunctionCallDepth > 0 && st.DeferredBindingIndex.ContainsKey dexpr) then
+                          // map forced inside a function call (G75, gap G257), and
+                          // never under reading B (BLADE_INTERP_READING=use)
+                          if st.Reading <> ReadingAtUse
+                             && not (st.FunctionCallDepth > 0 && st.DeferredBindingIndex.ContainsKey dexpr) then
                               cell.V <- fv
                           forcedHere <- Some fv
                           (match fv with VCompound cv -> Some cv | _ -> None)

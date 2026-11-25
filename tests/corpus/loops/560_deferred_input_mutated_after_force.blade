@@ -1,4 +1,6 @@
-// TEST: Deferred Input Mutated After Force
+// TEST: Deferred Input Mutated After Force (rejects)
+// BORROW, printing is a use (2026-11-23): now refused at the write (BL4005, formalism 10.2): the map prints, so it
+// is used at the end of the program, after the write. The text below is the schedule it witnessed (gap G60).
 // ----------------------------------------------------------------------------
 // Codex second look of W4-1, finding 3: a deferred map's INPUT is written after
 // the map was forced. The class value is fixed at its FIRST FORCING EVENT
@@ -16,8 +18,4 @@ let g2 = g
 let a = g(0)
 let b = g(1)
 x(0) = 5
-// EXPECT: g = [10, 5]
-// EXPECT: g2 = [10, 5]
-// EXPECT: a = 10
-// EXPECT: b = 5
-// EXPECT: x = [5, 2]
+// ERROR: BL4005 @ 19:1

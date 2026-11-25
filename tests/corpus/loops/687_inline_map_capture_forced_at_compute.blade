@@ -1,4 +1,6 @@
-// TEST: An inline computed map forces its kernel capture under its own name
+// TEST: An inline computed map forces its kernel capture under its own name (rejects)
+// BORROW (2026-11-23): now refused at the write (BL4005, formalism 10.2): an uncomputed value
+// over the written storage is still used after it. The text below is the schedule it witnessed (gap G199).
 // Gap G199 (Codex diff review round 3): `method_for(x) <@> k |> compute`,
 // the same map as a tuple-value member, and a fold over it all evaluate the
 // map here, which forces the deferred map d its kernel captures under its own
@@ -16,7 +18,4 @@ x(0) = 10.0
 let w = d(0)
 let w2 = d2(0)
 let w3 = d3(0)
-// EXPECT: s = 15.0
-// EXPECT: w = 2.0
-// EXPECT: w2 = 3.0
-// EXPECT: w3 = 4.0
+// ERROR: BL4005 @ 16:1

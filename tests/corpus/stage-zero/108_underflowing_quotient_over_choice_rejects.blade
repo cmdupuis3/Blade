@@ -1,0 +1,15 @@
+// TEST: A Quotient By A Literal Above One Over An Uncomputed Choice Is Refused (rejects)
+// ERROR: BL4022 @ 14:9
+// ERROR-CONTAINS: is not a stage that provably keeps zero cells zero and non-zero cells non-zero
+// ============================================================================
+// The owner's decision of 2026-11-24 (gap G335, formalism 10.4): a stage over an uncomputed guard or
+// choice whose two readings can differ does not compile.
+// The cell that breaks it: 1e-300 / 1e300 underflows to 0.0 (the right side then wins on the uncomputed
+// choice, 9e-300, and the computed one keeps 0.0). A quotient keeps zero cells only for 0 < |c| <= 1.
+// ============================================================================
+type I = Idx<3>
+let cf: Array<Float64 like I> = [1.5, 0.0, -2.0]
+let cf2: Array<Float64 like I> = [9.0, 4.0, 3.0]
+let tiny: Array<Float64 like I> = [1e-300, 0.0, 2.0]
+let shrink = lambda(z: Float64) -> z / 1e300
+let r = shrink <$> (tiny <|> cf2) |> compute

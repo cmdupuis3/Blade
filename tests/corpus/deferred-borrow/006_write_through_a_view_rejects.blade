@@ -1,0 +1,10 @@
+// TEST: borrow a write through a view of the borrowed storage (rejects)
+// r is a view of m's first row; writing r(1) writes m, which the uncomputed g
+// reads and uses later.
+let mut m: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let g = method_for(m) <@> lambda(v) -> v + 1.0
+let a = g(0, 0)
+let r = m(0)
+r(1) = 9.0
+let b = g(0, 1)
+// ERROR: BL4005 @ 7:1
